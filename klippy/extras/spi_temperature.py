@@ -13,7 +13,7 @@ from . import bus
 ######################################################################
 
 REPORT_TIME = 0.300
-MAX_INVALID_COUNT = 3
+MAX_INVALID_COUNT = 15
 
 class SensorBase:
     def __init__(self, config, chip_type, config_cmd=None, spi_mode=1):
