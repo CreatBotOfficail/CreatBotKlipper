@@ -81,7 +81,7 @@ class Heater:
         #              self.last_temp, self.last_temp_time, self.target_temp)
     def temperature_callback(self, read_time, temp):
         with self.lock:
-            time_diff = read_time - self.last_temp_time
+            time_diff = max(0, read_time - self.last_temp_time)
             self.last_temp = temp
             self.last_temp_time = read_time
             self.control.temperature_update(read_time, temp, self.target_temp)
