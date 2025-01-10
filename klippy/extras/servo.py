@@ -16,23 +16,24 @@ class PrinterServo:
                                          above=self.min_width,
                                          below=SERVO_SIGNAL_PERIOD)
         self.max_angle = config.getfloat('maximum_servo_angle', 180.)
+        self.steps_decomposed = config.getint('steps_decomposed', 0)
         self.angle_to_width = (self.max_width - self.min_width) / self.max_angle
         self.width_to_value = 1. / SERVO_SIGNAL_PERIOD
         self.last_value = self.last_value_time = 0.
-        initial_pwm = 0.
+        self.initial_pwm = 0.
         iangle = config.getfloat('initial_angle', None, minval=0., maxval=360.)
         if iangle is not None:
-            initial_pwm = self._get_pwm_from_angle(iangle)
+            self.initial_pwm = self._get_pwm_from_angle(iangle)
         else:
             iwidth = config.getfloat('initial_pulse_width', 0.,
                                      minval=0., maxval=self.max_width)
-            initial_pwm = self._get_pwm_from_pulse_width(iwidth)
+            self.initial_pwm = self._get_pwm_from_pulse_width(iwidth)
         # Setup mcu_servo pin
         ppins = self.printer.lookup_object('pins')
         self.mcu_servo = ppins.setup_pin('pwm', config.get('pin'))
         self.mcu_servo.setup_max_duration(0.)
         self.mcu_servo.setup_cycle_time(SERVO_SIGNAL_PERIOD)
-        self.mcu_servo.setup_start_value(initial_pwm, 0.)
+        self.mcu_servo.setup_start_value(self.initial_pwm, 0.)
         # Register commands
         servo_name = config.get_name().split()[1]
         gcode = self.printer.lookup_object('gcode')
@@ -48,6 +49,25 @@ class PrinterServo:
         self.mcu_servo.set_pwm(print_time, value)
         self.last_value = value
         self.last_value_time = print_time
+
+    def get_s_curve_value(self, last_value, value, t):
+        smooth_factor = t * t * (3 - 2 * t)
+        return last_value + smooth_factor * (value - last_value)
+
+    def _set_low_pwm(self, print_time, value):
+        if value == self.last_value:
+            return
+        if self.last_value == 0:
+            self.last_value = self.initial_pwm
+        steps = self.steps_decomposed
+        for step in range(steps):
+            t = step / (steps - 1)
+            current_value = self.get_s_curve_value(self.last_value, value, t)
+            print_time = max(print_time, self.last_value_time + 0.02)
+            self.mcu_servo.set_pwm(print_time, current_value)
+            self.last_value_time = print_time
+        self.last_value = value
+
     def _get_pwm_from_angle(self, angle):
         angle = max(0., min(self.max_angle, angle))
         width = self.min_width + angle * self.angle_to_width
@@ -61,10 +81,16 @@ class PrinterServo:
         print_time = self.printer.lookup_object('toolhead').get_last_move_time()
         width = gcmd.get_float('WIDTH', None)
         if width is not None:
-            self._set_pwm(print_time, self._get_pwm_from_pulse_width(width))
+            if self.steps_decomposed:
+                self._set_low_pwm(print_time, self._get_pwm_from_pulse_width(width))
+            else:
+                self._set_pwm(print_time, self._get_pwm_from_pulse_width(width))
         else:
             angle = gcmd.get_float('ANGLE')
-            self._set_pwm(print_time, self._get_pwm_from_angle(angle))
+            if self.steps_decomposed:
+                self._set_low_pwm(print_time, self._get_pwm_from_angle(angle))
+            else:
+                self._set_pwm(print_time, self._get_pwm_from_angle(angle))
 
 def load_config_prefix(config):
     return PrinterServo(config)
