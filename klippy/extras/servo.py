@@ -16,6 +16,7 @@ class PrinterServo:
                                          above=self.min_width,
                                          below=SERVO_SIGNAL_PERIOD)
         self.max_angle = config.getfloat('maximum_servo_angle', 180.)
+        self.signal_duration = config.getfloat('signal_duration', 0, minval=0.)
         self.steps_decomposed = config.getint('steps_decomposed', 0)
         self.angle_to_width = (self.max_width - self.min_width) / self.max_angle
         self.width_to_value = 1. / SERVO_SIGNAL_PERIOD
@@ -34,6 +35,8 @@ class PrinterServo:
         self.mcu_servo.setup_max_duration(0.)
         self.mcu_servo.setup_cycle_time(SERVO_SIGNAL_PERIOD)
         self.mcu_servo.setup_start_value(self.initial_pwm, 0.)
+        # Register event handler
+        self.printer.register_event_handler("klippy:ready", self._handle_ready)
         # Register commands
         servo_name = config.get_name().split()[1]
         gcode = self.printer.lookup_object('gcode')
@@ -49,11 +52,10 @@ class PrinterServo:
         self.mcu_servo.set_pwm(print_time, value)
         self.last_value = value
         self.last_value_time = print_time
-
-    def get_s_curve_value(self, last_value, value, t):
+        self._handle_signal_duration(print_time)
+    def _get_s_curve_value(self, last_value, value, t):
         smooth_factor = t * t * (3 - 2 * t)
         return last_value + smooth_factor * (value - last_value)
-
     def _set_low_pwm(self, print_time, value):
         if value == self.last_value:
             return
@@ -62,12 +64,21 @@ class PrinterServo:
         steps = self.steps_decomposed
         for step in range(steps):
             t = step / (steps - 1)
-            current_value = self.get_s_curve_value(self.last_value, value, t)
+            current_value = self._get_s_curve_value(self.last_value, value, t)
             print_time = max(print_time, self.last_value_time + 0.02)
             self.mcu_servo.set_pwm(print_time, current_value)
             self.last_value_time = print_time
         self.last_value = value
-
+        self._handle_signal_duration(print_time)
+    def _handle_signal_duration(self, print_time):
+        if self.signal_duration:
+            if abs(self.signal_duration / 0.02 - round(self.signal_duration / 0.02)) < 1e-9:
+                self.signal_duration -= 0.001
+            print_time = max(print_time, print_time + self.signal_duration)
+            self.mcu_servo.set_pwm(print_time, 0)
+    def _handle_ready(self):
+        print_time = self.printer.lookup_object('toolhead').get_last_move_time()
+        self._handle_signal_duration(print_time)
     def _get_pwm_from_angle(self, angle):
         angle = max(0., min(self.max_angle, angle))
         width = self.min_width + angle * self.angle_to_width
