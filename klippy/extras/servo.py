@@ -76,6 +76,7 @@ class PrinterServo:
                 self.signal_duration -= 0.001
             print_time = max(print_time, print_time + self.signal_duration)
             self.mcu_servo.set_pwm(print_time, 0)
+            self.last_value_time = print_time
     def _handle_ready(self):
         print_time = self.printer.lookup_object('toolhead').get_last_move_time()
         self._handle_signal_duration(print_time)
@@ -90,6 +91,7 @@ class PrinterServo:
     cmd_SET_SERVO_help = "Set servo angle"
     def cmd_SET_SERVO(self, gcmd):
         print_time = self.printer.lookup_object('toolhead').get_last_move_time()
+        print_time = max(print_time, self.last_value_time)
         width = gcmd.get_float('WIDTH', None)
         if width is not None:
             if self.steps_decomposed:
