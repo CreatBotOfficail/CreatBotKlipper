@@ -74,11 +74,12 @@ class PrinterServo:
         if self.signal_duration:
             if abs(self.signal_duration / 0.02 - round(self.signal_duration / 0.02)) < 1e-9:
                 self.signal_duration -= 0.001
-            print_time = max(print_time, print_time + self.signal_duration)
+            print_time = max(print_time + SERVO_SIGNAL_PERIOD, print_time + self.signal_duration)
             self.mcu_servo.set_pwm(print_time, 0)
+            self.last_value_time = print_time
     def _handle_ready(self):
         print_time = self.printer.lookup_object('toolhead').get_last_move_time()
-        self._handle_signal_duration(print_time)
+        self._set_pwm(print_time, self.initial_pwm)
     def _get_pwm_from_angle(self, angle):
         angle = max(0., min(self.max_angle, angle))
         width = self.min_width + angle * self.angle_to_width
@@ -90,6 +91,7 @@ class PrinterServo:
     cmd_SET_SERVO_help = "Set servo angle"
     def cmd_SET_SERVO(self, gcmd):
         print_time = self.printer.lookup_object('toolhead').get_last_move_time()
+        print_time = max(print_time, self.last_value_time)
         width = gcmd.get_float('WIDTH', None)
         if width is not None:
             if self.steps_decomposed:
