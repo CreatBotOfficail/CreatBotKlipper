@@ -519,6 +519,7 @@ class ProbeEndstopWrapper:
         self.home_start = self.mcu_endstop.home_start
         self.home_wait = self.mcu_endstop.home_wait
         self.query_endstop = self.mcu_endstop.query_endstop
+        self.probe_session = None
         # multi probes state
         self.multi = 'OFF'
     def _raise_probe(self):
@@ -542,6 +543,8 @@ class ProbeEndstopWrapper:
     def multi_probe_end(self):
         if self.stow_on_each_sample:
             return
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.manual_move([None, None, toolhead.get_position()[2]+2.0], self.probe_session.lift_speed)
         self._raise_probe()
         self.multi = 'OFF'
     def probing_move(self, pos, speed):
@@ -567,6 +570,7 @@ class PrinterProbe:
                                              self.mcu_probe.query_endstop)
         self.probe_offsets = ProbeOffsetsHelper(config)
         self.probe_session = ProbeSessionHelper(config, self.mcu_probe)
+        self.mcu_probe.probe_session = self.probe_session
     def get_probe_params(self, gcmd=None):
         return self.probe_session.get_probe_params(gcmd)
     def get_offsets(self):
