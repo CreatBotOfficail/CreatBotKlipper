@@ -1,11 +1,11 @@
 # Support for servos
 #
-# Copyright (C) 2017-2020  Kevin O'Connor <kevin@koconnor.net>
+# Copyright (C) 2017-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+from . import output_pin
 
 SERVO_SIGNAL_PERIOD = 0.020
-PIN_MIN_TIME = 0.100
 
 class PrinterServo:
     def __init__(self, config):
@@ -20,7 +20,7 @@ class PrinterServo:
         self.steps_decomposed = config.getint('steps_decomposed', 0)
         self.angle_to_width = (self.max_width - self.min_width) / self.max_angle
         self.width_to_value = 1. / SERVO_SIGNAL_PERIOD
-        self.last_value = self.last_value_time = 0.
+        self.last_value = 0.
         self.initial_pwm = 0.
         iangle = config.getfloat('initial_angle', None, minval=0., maxval=360.)
         if iangle is not None:
@@ -37,6 +37,9 @@ class PrinterServo:
         self.mcu_servo.setup_start_value(self.initial_pwm, 0.)
         # Register event handler
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
+        # Create gcode request queue
+        self.gcrq = output_pin.GCodeRequestQueue(
+            config, self.mcu_servo.get_mcu(), self._set_pwm)
         # Register commands
         servo_name = config.get_name().split()[1]
         gcode = self.printer.lookup_object('gcode')
@@ -47,11 +50,9 @@ class PrinterServo:
         return {'value': self.last_value}
     def _set_pwm(self, print_time, value):
         if value == self.last_value:
-            return
-        print_time = max(print_time, self.last_value_time + PIN_MIN_TIME)
-        self.mcu_servo.set_pwm(print_time, value)
+            return "discard", 0.
         self.last_value = value
-        self.last_value_time = print_time
+        self.mcu_servo.set_pwm(print_time, value)
         self._handle_signal_duration(print_time)
     def _get_s_curve_value(self, last_value, value, t):
         smooth_factor = t * t * (3 - 2 * t)
@@ -90,20 +91,20 @@ class PrinterServo:
         return width * self.width_to_value
     cmd_SET_SERVO_help = "Set servo angle"
     def cmd_SET_SERVO(self, gcmd):
-        print_time = self.printer.lookup_object('toolhead').get_last_move_time()
         print_time = max(print_time, self.last_value_time)
         width = gcmd.get_float('WIDTH', None)
         if width is not None:
             if self.steps_decomposed:
                 self._set_low_pwm(print_time, self._get_pwm_from_pulse_width(width))
             else:
-                self._set_pwm(print_time, self._get_pwm_from_pulse_width(width))
+                value = self._get_pwm_from_pulse_width(width)
         else:
             angle = gcmd.get_float('ANGLE')
             if self.steps_decomposed:
                 self._set_low_pwm(print_time, self._get_pwm_from_angle(angle))
             else:
-                self._set_pwm(print_time, self._get_pwm_from_angle(angle))
+                value = self._get_pwm_from_angle(angle)
+        self.gcrq.queue_gcode_request(value)
 
 def load_config_prefix(config):
     return PrinterServo(config)
