@@ -16,7 +16,8 @@ class PrinterSensorGeneric:
                                         minval=KELVIN_TO_CELSIUS)
         self.max_temp = config.getfloat('max_temp', 99999999.9,
                                         above=self.min_temp)
-        self.sensor.setup_minmax(self.min_temp, self.max_temp)
+        self.overshoot = config.getfloat('overshoot', default=20., above=0.)
+        self.sensor.setup_minmax(self.min_temp, self.max_temp + self.overshoot)
         self.sensor.setup_callback(self.temperature_callback)
         pheaters.register_sensor(config, self)
         self.last_temp = 0.
