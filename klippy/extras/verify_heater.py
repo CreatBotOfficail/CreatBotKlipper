@@ -51,11 +51,16 @@ class HeaterCheck:
             if self.approaching_target and target:
                 logging.info("Heater %s within range of %.3f",
                              self.heater_name, target)
-            self.approaching_target = self.starting_approach = False
+            if self.starting_approach and temp >= self.goal_temp:
+                self.starting_approach = False
+            if self.starting_approach is False:
+                self.approaching_target = False
             if temp <= target + self.hysteresis:
                 self.error = 0.
-            self.last_target = target
-            return eventtime + 1.
+            if target <= 0.:
+                self.last_target = target
+            if target == self.last_target:
+                return eventtime + 1.
         self.error += (target - self.hysteresis) - temp
         if not self.approaching_target:
             if target != self.last_target:
@@ -64,6 +69,8 @@ class HeaterCheck:
                              self.heater_name, target)
                 self.approaching_target = self.starting_approach = True
                 self.goal_temp = temp + self.heating_gain
+                if temp > target:
+                    self.starting_approach = False
                 self.goal_systime = eventtime + self.check_gain_time
             elif self.error >= self.max_error:
                 # Failure due to inability to maintain target temperature
