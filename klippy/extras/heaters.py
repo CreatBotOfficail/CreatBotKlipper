@@ -40,6 +40,7 @@ class Heater:
         self.smooth_time = config.getfloat('smooth_time', 1., above=0.)
         self.inv_smooth_time = 1. / self.smooth_time
         self.verify_mainthread_time = -999.
+        self.is_waiting = False
         self.lock = threading.Lock()
         self.last_temp = self.smoothed_temp = self.target_temp = 0.
         self.last_temp_time = 0.
@@ -347,6 +348,9 @@ class PrinterHeaters:
         reactor = self.printer.get_reactor()
         eventtime = reactor.monotonic()
         while not self.printer.is_shutdown() and heater.check_busy(eventtime):
+            if not heater.is_waiting:
+                gcode.respond_info(f"{heater.name} exited target temperature waiting")
+                return
             print_time = toolhead.get_last_move_time()
             gcode.respond_raw(self._get_temp(eventtime))
             eventtime = reactor.pause(eventtime + 1.)
@@ -355,6 +359,7 @@ class PrinterHeaters:
         toolhead.register_lookahead_callback((lambda pt: None))
         heater.set_temp(temp)
         if wait and temp:
+            heater.is_waiting = True
             self._wait_for_temperature(heater)
     cmd_TEMPERATURE_WAIT_help = "Wait for a temperature on a sensor"
     def cmd_TEMPERATURE_WAIT(self, gcmd):
@@ -372,10 +377,14 @@ class PrinterHeaters:
             sensor = self.heaters[sensor_name]
         else:
             sensor = self.printer.lookup_object(sensor_name)
+        sensor.is_waiting = True
         toolhead = self.printer.lookup_object("toolhead")
         reactor = self.printer.get_reactor()
         eventtime = reactor.monotonic()
         while not self.printer.is_shutdown():
+            if not sensor.is_waiting:
+                gcmd.respond_info(f"{sensor_name} exited target temperature waiting")
+                return
             temp, target = sensor.get_temp(eventtime)
             if temp >= min_temp and temp <= max_temp:
                 return

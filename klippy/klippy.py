@@ -195,6 +195,46 @@ class Printer:
         except:
             logging.exception("Unhandled exception during post run")
         return run_result
+    def _get_print_state(self):
+        eventtime = self.reactor.monotonic()
+        virtual_sdcard = self.lookup_object('virtual_sdcard')
+        if not virtual_sdcard:
+            return None
+        print_stats = getattr(virtual_sdcard, 'print_stats', None)
+        return print_stats.get_status(eventtime)["state"] if print_stats else None
+    def is_printing(self):
+        print_state = self._get_print_state()
+        idle_timeout = self.lookup_object("idle_timeout")
+        idle_state = idle_timeout.get_status(self.reactor.monotonic())["state"].lower() if idle_timeout else ""
+        return print_state in ("printing", "paused") or idle_state == "printing"
+    def is_cancelled(self):
+        return self._get_print_state() == "cancelled"
+    def is_complete(self):
+        return self._get_print_state() == "complete"
+    def is_paused(self):
+        return self._get_print_state() == "paused"
+    def handle_internal_error(self, msg: str, gcode, should_pause: bool = False, 
+                            should_stop_heaters: bool = False, heater=None):
+        gcode._respond_error(f"INTERNAL_ERROR: {msg}")
+        if should_pause:
+            logging.info("Attempting to pause print")
+            if not self.is_paused():
+                try:
+                    gcode.run_script_from_command("PAUSE")
+                except Exception as e:
+                    gcode._respond_error(f"PAUSE_FAILED: {str(e)}")
+            toolhead = self.lookup_object('toolhead')
+            extruder = toolhead.get_extruder()
+            extruder_heater = extruder.get_heater()
+            extruder_heater.can_extrude = True
+            if heater and heater.is_waiting:
+                heater.is_waiting = False
+        if should_stop_heaters and heater is not None:
+            target_temp = max(heater.min_temp, 0)
+            heater.set_temp(target_temp)
+            msg = f"Heater {heater.name} set to safety temp {target_temp:.1f}℃"
+            gcode.respond_info(msg)
+            logging.warning(msg)
     def set_rollover_info(self, name, info, log=True):
         if log:
             logging.info(info)

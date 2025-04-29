@@ -13,6 +13,7 @@ for the parameters that control this check.
 class HeaterCheck:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.gcode = self.printer.lookup_object("gcode")
         self.printer.register_event_handler("klippy:connect",
                                             self.handle_connect)
         self.printer.register_event_handler("klippy:shutdown",
@@ -74,7 +75,7 @@ class HeaterCheck:
                 self.goal_systime = eventtime + self.check_gain_time
             elif self.error >= self.max_error:
                 # Failure due to inability to maintain target temperature
-                return self.heater_fault()
+                return self.heater_fault(eventtime)
         elif temp >= self.goal_temp:
             # Temperature approaching target - reset checks
             self.starting_approach = False
@@ -90,9 +91,13 @@ class HeaterCheck:
             self.goal_temp = min(self.goal_temp, temp + self.heating_gain)
         self.last_target = target
         return eventtime + 1.
-    def heater_fault(self):
+    def heater_fault(self, eventtime):
+        temp, target = self.heater.get_temp(eventtime)
         msg = "Heater %s not heating at expected rate" % (self.heater_name,)
         logging.error(msg)
+        if self.printer.is_printing():
+            self.printer.handle_internal_error(msg, self.gcode, True, True, self.heater)
+            return eventtime + 1.
         self.printer.invoke_shutdown(msg + HINT_THERMAL)
         return self.printer.get_reactor().NEVER
 
