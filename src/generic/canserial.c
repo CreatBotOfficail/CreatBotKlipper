@@ -345,11 +345,59 @@ command_get_canbus_id(uint32_t *args)
 }
 DECL_COMMAND_FLAGS(command_get_canbus_id, HF_IN_SHUTDOWN, "get_canbus_id");
 
+int
+hex_char_to_decimal(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    } else if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    } else if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    return 0;
+}
+
+uint64_t
+hex_to_decimal(const char *hex_num) {
+    uint64_t decimal_num = 0;
+    int len = strlen(hex_num);
+    uint64_t power = 1;
+    for (int i = len - 1; i >= 0; i--) {
+        int digit = hex_char_to_decimal(hex_num[i]);
+        decimal_num += (uint64_t)digit * power;
+        power *= 16;
+    }
+    return decimal_num;
+}
+
+void
+reverse_hex_string(char *hex_str) {
+    int len = strlen(hex_str);
+    if (len % 2 != 0) {
+        return;
+    }
+    for (int i = 0; i < len / 2; i += 2) {
+        char temp1 = hex_str[i];
+        char temp2 = hex_str[i + 1];
+        hex_str[i] = hex_str[len - i - 2];
+        hex_str[i + 1] = hex_str[len - i - 1];
+        hex_str[len - i - 2] = temp1;
+        hex_str[len - i - 1] = temp2;
+    }
+}
 void
 canserial_set_uuid(uint8_t *raw_uuid, uint32_t raw_uuid_len)
 {
-    uint64_t hash = fasthash64(raw_uuid, raw_uuid_len, 0xA16231A7);
-    memcpy(CanData.uuid, &hash, sizeof(CanData.uuid));
+    if (CONFIG_CAN_UUID_USE_CHIPID){
+        uint64_t hash = fasthash64(raw_uuid, raw_uuid_len, 0xA16231A7);
+        memcpy(CanData.uuid, &hash, sizeof(CanData.uuid));
+    }else{
+        char uuid_str[32];
+        strcpy(uuid_str, CONFIG_CAN_UUID_CUSTOM);
+        reverse_hex_string(uuid_str);
+        uint64_t config_uuid = hex_to_decimal(uuid_str);
+        memcpy(CanData.uuid, &config_uuid, sizeof(CanData.uuid));
+    }
     canserial_notify_rx();
 }
 
