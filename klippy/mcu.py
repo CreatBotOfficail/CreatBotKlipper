@@ -560,6 +560,7 @@ class MCU:
         self._baud = 0
         self._canbus_iface = None
         canbus_uuid = config.get('canbus_uuid', None)
+        self.min_firmware_version = config.get('min_firmware_version', '1.0.0')
         if canbus_uuid is not None:
             self._serialport = canbus_uuid
             self._canbus_iface = config.get('canbus_interface', 'can0')
@@ -822,6 +823,7 @@ class MCU:
         self._get_status_info['mcu_version'] = version
         self._get_status_info['mcu_build_versions'] = build_versions
         self._get_status_info['mcu_constants'] = msgparser.get_constants()
+        self._get_status_info['min_firmware_version'] = self.min_firmware_version
         self.register_response(self._handle_shutdown, 'shutdown')
         self.register_response(self._handle_shutdown, 'is_shutdown')
         self.register_response(self._handle_mcu_stats, 'stats')
