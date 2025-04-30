@@ -39,6 +39,7 @@ class MCU_stepper:
         self._invert_dir = self._orig_invert_dir = dir_pin_params['invert']
         self._step_both_edge = self._req_step_both_edge = False
         self._mcu_position_offset = 0.
+        self.taskline = 0
         self._reset_cmd_tag = self._get_position_cmd = None
         self._active_callbacks = []
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -90,7 +91,7 @@ class MCU_stepper:
         self._mcu.add_config_cmd("reset_step_clock oid=%d clock=0"
                                  % (self._oid,), on_restart=True)
         step_cmd_tag = self._mcu.lookup_command(
-            "queue_step oid=%c interval=%u count=%hu add=%hi").get_command_tag()
+            "queue_step oid=%c interval=%u count=%hu add=%hi taskline=%u").get_command_tag()
         dir_cmd_tag = self._mcu.lookup_command(
             "set_next_step_dir oid=%c dir=%c").get_command_tag()
         self._reset_cmd_tag = self._mcu.lookup_command(
@@ -98,6 +99,9 @@ class MCU_stepper:
         self._get_position_cmd = self._mcu.lookup_query_command(
             "stepper_get_position oid=%c",
             "stepper_position oid=%c pos=%i", oid=self._oid)
+        self._get_taskline_cmd = self._mcu.lookup_query_command(
+            "stepper_get_taskline oid=%c",
+            "stepper_taskline line=%u")
         max_error = self._mcu.get_max_stepper_error()
         max_error_ticks = self._mcu.seconds_to_clock(max_error)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -164,6 +168,11 @@ class MCU_stepper:
         return (data, count)
     def get_stepper_kinematics(self):
         return self._stepper_kinematics
+    def get_stepper_taskline(self):
+        if self._mcu.is_fileoutput():
+            return 0
+        params = self._get_taskline_cmd.send([self._oid])
+        return int(params['line'])
     def set_stepper_kinematics(self, sk):
         old_sk = self._stepper_kinematics
         mcu_pos = 0

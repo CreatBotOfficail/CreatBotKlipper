@@ -113,6 +113,7 @@ class GCodeMove:
     def cmd_G1(self, gcmd):
         # Move
         params = gcmd.get_command_parameters()
+        line = gcmd.get_taskline()
         try:
             for pos, axis in enumerate('XYZ'):
                 if axis in params:
@@ -140,7 +141,7 @@ class GCodeMove:
         except ValueError as e:
             raise gcmd.error("Unable to parse move '%s'"
                              % (gcmd.get_commandline(),))
-        self.move_with_transform(self.last_position, self.speed)
+        self.move_with_transform(self.last_position, self.speed, line)
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
         # Set units to inches

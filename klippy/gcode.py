@@ -12,14 +12,17 @@ Coord = collections.namedtuple('Coord', ('x', 'y', 'z', 'e'))
 
 class GCodeCommand:
     error = CommandError
-    def __init__(self, gcode, command, commandline, params, need_ack):
+    def __init__(self, gcode, command, commandline, params, need_ack, taskline):
         self._command = command
         self._commandline = commandline
         self._params = params
         self._need_ack = need_ack
+        self.taskline = taskline
         # Method wrappers
         self.respond_info = gcode.respond_info
         self.respond_raw = gcode.respond_raw
+    def get_taskline(self):
+        return self.taskline
     def get_command(self):
         return self._command
     def get_commandline(self):
@@ -189,6 +192,11 @@ class GCodeDispatch:
     # Parse input into commands
     args_r = re.compile('([A-Z_]+|[A-Z*])')
     def _process_commands(self, commands, need_ack=True):
+        sdcard = self.printer.lookup_object('virtual_sdcard', None)
+        if sdcard is not None:
+             taskline = sdcard.file_line
+        else:
+             taskline = 0
         for line in commands:
             # Ignore comments and leading/trailing spaces
             line = origline = line.strip()
@@ -205,7 +213,7 @@ class GCodeDispatch:
             # Build gcode "params" dictionary
             params = { parts[i]: parts[i+1].strip()
                        for i in range(1, len(parts), 2) }
-            gcmd = GCodeCommand(self, cmd, origline, params, need_ack)
+            gcmd = GCodeCommand(self, cmd, origline, params, need_ack, taskline)
             # Invoke handler for command
             handler = self.gcode_handlers.get(cmd, self.cmd_default)
             try:
@@ -231,7 +239,7 @@ class GCodeDispatch:
     def get_mutex(self):
         return self.mutex
     def create_gcode_command(self, command, commandline, params):
-        return GCodeCommand(self, command, commandline, params, False)
+        return GCodeCommand(self, command, commandline, params, False, 0)
     # Response handling
     def respond_raw(self, msg):
         for cb in self.output_callbacks:

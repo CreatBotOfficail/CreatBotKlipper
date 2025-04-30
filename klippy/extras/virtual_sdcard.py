@@ -29,6 +29,9 @@ class VirtualSD:
         self.reactor = self.printer.get_reactor()
         self.must_pause_work = self.cmd_from_sd = False
         self.next_file_position = 0
+        self.file_line = 0
+        self.file_runline = 0
+        self.linfo = ""
         self.work_timer = None
         # Error handling
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
@@ -46,6 +49,8 @@ class VirtualSD:
         self.gcode.register_command(
             "SDCARD_PRINT_FILE", self.cmd_SDCARD_PRINT_FILE,
             desc=self.cmd_SDCARD_PRINT_FILE_help)
+        self.gcode.register_command(
+            'GET_TASKLINE', self.cmd_GET_TASKLINE, False)
     def handle_shutdown(self):
         if self.work_timer is not None:
             self.must_pause_work = True
@@ -95,6 +100,7 @@ class VirtualSD:
             'progress': self.progress(),
             'is_active': self.is_active(),
             'file_position': self.file_position,
+            'file_line': self.file_runline,
             'file_size': self.file_size,
         }
     def file_path(self):
@@ -111,6 +117,7 @@ class VirtualSD:
     def do_pause(self):
         if self.work_timer is not None:
             self.must_pause_work = True
+            self._get_runline()
             while self.work_timer is not None and not self.cmd_from_sd:
                 self.reactor.pause(self.reactor.monotonic() + .001)
     def do_resume(self):
@@ -126,6 +133,7 @@ class VirtualSD:
             self.current_file = None
             self.print_stats.note_cancel()
         self.file_position = self.file_size = 0
+        self.file_line = self.file_runline = 0
     # G-Code commands
     def cmd_error(self, gcmd):
         raise gcmd.error("SD write not supported")
@@ -135,10 +143,28 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
         self.file_position = self.file_size = 0
+        self.file_line = self.file_runline = 0
         self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
         "if necessary"
+    def _get_runline(self):
+        toolhead = self.printer.lookup_object('toolhead', None)
+        if toolhead is None:
+            raise self.gcode.error("Printer not ready")
+        kin = toolhead.get_kinematics()
+        steppers = kin.get_steppers()
+        linfo = [(s.get_name(), s.get_stepper_taskline()) for s in steppers if s.get_name() != "stepper_z"]
+        max_position = max(position for _, position in linfo)
+        self.linfo = linfo
+        self.file_runline = max_position
+
+    def cmd_GET_TASKLINE(self, gcmd):
+        if not self.must_pause_work:
+            self._get_runline()
+        formatted_pairs = [f"{key}:{value}" for key, value in self.linfo]
+        formatted_line = " ".join(formatted_pairs)
+        gcmd.respond_info(f"stepper line: {formatted_line}")
     def cmd_SDCARD_RESET_FILE(self, gcmd):
         if self.cmd_from_sd:
             raise gcmd.error(
@@ -217,6 +243,8 @@ class VirtualSD:
                          % (self.file_position, self.file_size))
     def get_file_position(self):
         return self.next_file_position
+    def get_file_line(self):
+        return self.file_line
     def set_file_position(self, pos):
         self.next_file_position = pos
     def is_cmd_from_sd(self):
@@ -264,6 +292,7 @@ class VirtualSD:
             # Dispatch command
             self.cmd_from_sd = True
             line = lines.pop()
+            self.file_line += 1
             if sys.version_info.major >= 3:
                 next_file_position = self.file_position + len(line.encode()) + 1
             else:

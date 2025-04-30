@@ -41,6 +41,7 @@ itersolve_gen_steps_range(struct stepper_kinematics *sk, struct move *m
     int is_dir_change = 0, have_bracket = 0, check_oscillate = 0;
     double target = sk->commanded_pos + (sdir ? half_step : -half_step);
     double last_time=start, low_time=start, high_time=start + SEEK_TIME_RESET;
+    stepcompress_set_taskline(sk->sc, m->taskline);
     if (high_time > end)
         high_time = end;
     for (;;) {

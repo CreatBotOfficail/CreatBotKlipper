@@ -177,7 +177,7 @@ class ExcludeObject:
         }
         return status
 
-    def move(self, newpos, speed):
+    def move(self, newpos, speed, taskline=0):
         move_in_excluded_region = self._test_in_excluded_region()
         self.last_speed = speed
 
