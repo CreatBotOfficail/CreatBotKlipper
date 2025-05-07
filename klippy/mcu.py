@@ -560,7 +560,7 @@ class MCU:
         self._baud = 0
         self._canbus_iface = None
         canbus_uuid = config.get('canbus_uuid', None)
-        self.min_firmware_version = config.get('min_firmware_version', '1.0.0')
+        self.min_firmware_version = config.get('min_firmware_version', '1.2.0')
         if canbus_uuid is not None:
             self._serialport = canbus_uuid
             self._canbus_iface = config.get('canbus_interface', 'can0')
