@@ -32,6 +32,7 @@
 struct stepper_move {
     struct move_node node;
     uint32_t interval;
+    uint32_t taskline;
     int16_t add;
     uint16_t count;
     uint8_t flags;
@@ -227,6 +228,7 @@ command_queue_step(uint32_t *args)
     if (!m->count)
         shutdown("Invalid count parameter");
     m->add = args[3];
+    m->taskline = args[4];
     m->flags = 0;
 
     irq_disable();
@@ -249,7 +251,7 @@ command_queue_step(uint32_t *args)
     irq_enable();
 }
 DECL_COMMAND(command_queue_step,
-             "queue_step oid=%c interval=%u count=%hu add=%hi");
+             "queue_step oid=%c interval=%u count=%hu add=%hi taskline=%u");
 
 // Set the direction of the next queued step
 void
@@ -306,6 +308,29 @@ command_stepper_get_position(uint32_t *args)
     sendf("stepper_position oid=%c pos=%i", oid, position - POSITION_BIAS);
 }
 DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
+
+// Report the current line of the stepper
+void
+command_stepper_get_taskline(uint32_t *args)
+{
+    uint8_t oid = args[0];
+    struct stepper *s = stepper_oid_lookup(oid);
+    uint32_t max_taskline = 0;
+    irq_disable();
+    struct move_node *mn = s->mq.first;
+    while (mn) {
+        struct stepper_move *m = container_of(mn, struct stepper_move, node);
+        if(m->taskline){
+            if (m->taskline > max_taskline)
+                max_taskline = m->taskline;
+            break;
+        }
+        mn = mn->next;
+    }
+    irq_enable();
+    sendf("stepper_taskline line=%u", max_taskline);
+}
+DECL_COMMAND(command_stepper_get_taskline, "stepper_get_taskline oid=%c");
 
 // Stop all moves for a given stepper (caller must disable IRQs)
 static void

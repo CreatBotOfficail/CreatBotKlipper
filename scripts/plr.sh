@@ -1,34 +1,114 @@
 #!/bin/bash
-# $1 z_height $2 filename $3 z_offset
+PLR_DIR="/home/klipper/printer_data/gcodes/.plr"
+CONFIG_FILE="/home/klipper/printer_data/config/config_variables.cfg"
+LOG_FILE="/home/klipper/printer_data/logs/moonraker.log"
+echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> [$(date '+%F %T')] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" >> "$LOG_FILE"
 
-mkdir -p ~/printer_data/gcodes/.plr
-filepath=$(sed -n "s/.*filepath *= *'\([^']*\)'.*/\1/p" /home/klipper/printer_data/config/config_variables.cfg)
-filepath=$(printf "$filepath")
-echo "$filepath"
+z_offset="$1"
 
-last_file=$(sed -n "s/.*last_file *= *'\([^']*\)'.*/\1/p" /home/klipper/printer_data/config/config_variables.cfg)
-last_file=$(printf "$last_file")
-echo "$last_file"
-plr=$last_file
-echo "plr=$plr"
-PLR_PATH=~/printer_data/gcodes/.plr
+mkdir -p "$PLR_DIR" || {
+    echo "[$(date '+%F %T')] ERROR: Unable to create the directory: $PLR_DIR" >> "$LOG_FILE"
+    exit 2
+}
 
-file_content=$(cat "${filepath}" | awk '/; thumbnail begin/{flag=1;next}/; thumbnail end/{flag=0} !flag' | grep -v "^;simage:\|^;gimage:")
+filepath=$(sed -n "s/.*filepath *= *'\([^']*\)'.*/\1/p" "$CONFIG_FILE")
+cp "${filepath}" "/home/klipper/plrtmpA.$$"
+sourcefile="/home/klipper/plrtmpA.$$"
 
-echo "$file_content" | sed  's/\r$//' | awk -F"Z" 'BEGIN{OFS="Z"} {if ($2 ~ /^[0-9]+$/) $2=$2".0"} 1' > /home/klipper/plrtmpA.$$
-sed -i 's/Z\./Z0\./g' /home/klipper/plrtmpA.$$
-z_pos=$(echo "${1} + ${3}" | bc)
-cat /home/klipper/plrtmpA.$$ | sed -e '1,/Z'${1}'/ d' | sed -ne '/ Z/,$ p' | grep -m 1 ' Z' | sed -ne "s/.* Z\([^ ]*\).*/SET_KINEMATIC_POSITION Z=${z_pos}/p" > ${PLR_PATH}/"${plr}"
+raw_value=$(sed -n -E "s/^[[:space:]]*power_loss_paused[[:space:]]*=[[:space:]]*(True|False)[[:space:]]*(;.*)?$/\1/p" "$CONFIG_FILE" | tail -n1)
+is_pause=False
+[[ "${raw_value,,}" == "true" ]] && is_pause=True
 
-cat /home/klipper/plrtmpA.$$ | sed '/ Z'${1}'/q' | sed -ne '/\(M104\|M140\|M109\|M190\)/p' >> ${PLR_PATH}/"${plr}"
+raw_line=$(sed -n -E "s/power_resume_line[[:space:]]*=[[:space:]]*([1-9][0-9]*)['\"]?[[:space:]]*(;.*)?$/\1/p" "$CONFIG_FILE")
+run_line=$(tr -cd '0-9' <<< "$raw_line")
+if [[ ! "$run_line" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: power_resume_line, It must be a valid positive integer" >> "$LOG_FILE"
+    echo "Current configuration value:'$run_line'" >> "$LOG_FILE"
+    exit 1
+fi
+echo "When power outage, the printer is executing $run_line line of the file." >> "$LOG_FILE"
 
-line=$(cat /home/klipper/plrtmpA.$$ | sed '/ Z'${1}'/q' | sed -n '/START_PRINT/p')
+raw_position=$(sed -n -E "s/power_resume_position[[:space:]]*=[[:space:]]*([1-9][0-9]*)['\"]?[[:space:]]*(;.*)?$/\1/p" "$CONFIG_FILE")
+target_pos=$(tr -cd '0-9' <<< "$raw_position")
+if [[ ! "$target_pos" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: power_resume_position, It must be a valid positive integer" >> "$LOG_FILE"
+    echo "Current configuration value:'$target_pos'" >> "$LOG_FILE"
+    exit 1
+fi
 
-if [ -n "$line" ]; then
-    EXTRUDER=$(echo "$line" | sed -n 's/.*EXTRUDER=\([0-9]*\).*/\1/p')
-    EXTRUDER1=$(echo "$line" | sed -n 's/.*EXTRUDER1=\([0-9]*\).*/\1/p')
-    BED=$(echo "$line" | sed -n 's/.*BED=\([0-9]*\).*/\1/p')
-    CHAMBER=$(echo "$line" | sed -n 's/.*CHAMBER=\([0-9]*\).*/\1/p')
+last_file="${filepath##*/}"
+
+echo "Power-off recovery file path: $filepath" >> "$LOG_FILE"
+echo "Last printed file name: $last_file" >> "$LOG_FILE"
+plr="$last_file"
+
+cat "${sourcefile}" | awk '
+    {
+        sub(/\r$/, "")
+        if ($0 ~ /^;/ || $0 ~ /^[[:space:]]*$/) {
+            print
+        } else {
+            exit
+        }
+    }' > "${PLR_DIR}/${plr}"
+
+line=$(awk -v target="$target_pos" '
+    BEGIN { current_pos = 0; line_number = 1 }
+    {
+        line_length = length($0) + 1  # +1 对应换行符(Linux: \n, Windows: \r\n)
+        if (current_pos <= target && target < current_pos + line_length) {
+            print line_number
+            exit
+        }
+        current_pos += line_length
+        line_number++
+    }
+' "$sourcefile")
+echo "When power outage, it was parsing the $target_pos byte and the $line line" >> "$LOG_FILE"
+
+line="$run_line"
+
+z_height=$(awk -v target_line="$line" '
+    BEGIN { found = 0 }
+    NR <= target_line {
+        if ($0 ~ /^;[[:space:]]*Z:/) {
+            split($0, parts, /:[[:space:]]*/)
+            z_val = parts[2]
+            found = 1
+        }
+    }
+    NR == target_line {
+        if (found) {
+            print z_val
+        }
+        exit
+    }
+' "$sourcefile")
+echo "When power outage, the printing height: $z_height, the offset value: $z_offset" >> "$LOG_FILE"
+
+z_pos=$(echo "${z_height} + ${z_offset}" | bc)
+echo "Assign the Z height as: $z_pos" >> "$LOG_FILE"
+
+echo "SET_KINEMATIC_POSITION Z=${z_pos}" >> "${PLR_DIR}/${plr}"
+echo ";Z:${z_pos}" >> "${PLR_DIR}/${plr}"
+
+awk -v end_line="$line" '
+    NR > end_line { exit }
+    /M104|M140|M109|M190/ { print }
+' "$sourcefile" >> "${PLR_DIR}/${plr}"
+
+start_info=$(awk -v max_line="$line" '
+    NR > max_line { exit }
+    $0 ~ /^(START_PRINT|PRINT_START)/ {
+        print
+        exit
+    }
+' "$sourcefile")
+if [ -n "$start_info" ]; then
+    EXTRUDER=$(echo "$start_info" | sed -n 's/.*EXTRUDER=\([0-9]*\).*/\1/p')
+    EXTRUDER1=$(echo "$start_info" | sed -n 's/.*EXTRUDER1=\([0-9]*\).*/\1/p')
+    BED=$(echo "$start_info" | sed -n 's/.*BED=\([0-9]*\).*/\1/p')
+    CHAMBER=$(echo "$start_info" | sed -n 's/.*CHAMBER=\([0-9]*\).*/\1/p')
     EXTRUDER=${EXTRUDER:-0}
     EXTRUDER1=${EXTRUDER1:-0}
     BED=${BED:-0}
@@ -39,56 +119,112 @@ if [ -n "$line" ]; then
 
     for i in "${!temps[@]}"; do
         if [ "${temps[$i]}" != "0" ]; then
-            echo "${temp_cmds[$i]} ${temps[$i]}" >> "${PLR_PATH}/${plr}"
+            echo "${temp_cmds[$i]} ${temps[$i]}" >> "${PLR_DIR}/${plr}"
         fi
     done
 fi
 
 
-cat /home/klipper/plrtmpA.$$ | sed -ne '/;End of Gcode/,$ p' | tr '\n' ' ' | sed -ne 's/ ;[^ ]* //gp' | sed -ne 's/\\\\n/;/gp' | tr ';' '\n' | grep material_bed_temperature | sed -ne 's/.* = /M140 S/p' | head -1 >> ${PLR_PATH}/"${plr}"
-cat /home/klipper/plrtmpA.$$ | sed -ne '/;End of Gcode/,$ p' | tr '\n' ' ' | sed -ne 's/ ;[^ ]* //gp' | sed -ne 's/\\\\n/;/gp' | tr ';' '\n' | grep material_print_temperature | sed -ne 's/.* = /M104 S/p' | head -1 >> ${PLR_PATH}/"${plr}"
-cat /home/klipper/plrtmpA.$$ | sed -ne '/;End of Gcode/,$ p' | tr '\n' ' ' | sed -ne 's/ ;[^ ]* //gp' | sed -ne 's/\\\\n/;/gp' | tr ';' '\n' | grep material_bed_temperature | sed -ne 's/.* = /M190 S/p' | head -1 >> ${PLR_PATH}/"${plr}"
-cat /home/klipper/plrtmpA.$$ | sed -ne '/;End of Gcode/,$ p' | tr '\n' ' ' | sed -ne 's/ ;[^ ]* //gp' | sed -ne 's/\\\\n/;/gp' | tr ';' '\n' | grep material_print_temperature | sed -ne 's/.* = /M109 S/p' | head -1 >> ${PLR_PATH}/"${plr}"
+awk -v plr="${PLR_DIR}/${plr}" '
+    BEGIN {
+        bed_temp = 0
+        print_temp = 0
+        cmd_generated = 0
+    }
+    $0 ~ /;End of Gcode/,0 {
+        gsub(/\r?\n/, " ")
+        gsub(/;/, "\n")
+        gsub(/[ \t]+/, " ")
 
+        if (match($0, /material_bed_temperature[ =]+([0-9]+)/, m))
+            bed_temp = m[1]
+        if (match($0, /material_print_temperature[ =]+([0-9]+)/, m))
+            print_temp = m[1]
 
-BG_EX=`tac /home/klipper/plrtmpA.$$ | sed -e '/ Z'${1}'[^0-9]*$/q' | tac | tail -n+2 | sed -e '/ Z[0-9]/ q' | tac | sed -e '/ E[0-9]/ q' | sed -ne 's/.* E\([^ ]*\)/G92 E\1/p'`
-# If we failed to match an extrusion command (allowing us to correctly set the E axis) prior to the matched layer height, then simply set the E axis to the first E value present in the resemued gcode.  This avoids extruding a huge blod on resume, and/or max extrusion errors.
-if [ "${BG_EX}" = "" ]; then
- BG_EX=`tac /home/klipper/plrtmpA.$$ | sed -e '/ Z'${1}'[^0-9]*$/q' | tac | tail -n+2 | sed -ne '/ Z/,$ p' | sed -e '/ E[0-9]/ q' | sed -ne 's/.* E\([^ ]*\)/G92 E\1/p'`
-fi
-M83=$(cat /home/klipper/plrtmpA.$$ | sed '/ Z'${1}'/q' | sed -ne '/\(M83\)/p')
-if [ -n "${M83}" ];then
- echo 'G92 E0' >> ${PLR_PATH}/"${plr}"
- echo ${M83} >> ${PLR_PATH}/"${plr}"
-else
- echo ${BG_EX} >> ${PLR_PATH}/"${plr}"
-fi
-echo 'G91' >> ${PLR_PATH}/"${plr}"
-echo 'G1 Z10' >> ${PLR_PATH}/"${plr}"
-echo 'G90' >> ${PLR_PATH}/"${plr}"
-echo 'G28 X Y' >> ${PLR_PATH}/"${plr}"
-cat /home/klipper/plrtmpA.$$ | sed '/ Z'${1}'/q' | sed -ne '/\(ACTIVATE_COPY_MODE\|ACTIVATE_MIRROR_MODE\)/p' >> ${PLR_PATH}/"${plr}"
-echo 'G1 X5' >> ${PLR_PATH}/"${plr}"
-echo 'G1 Y5' >> ${PLR_PATH}/"${plr}"
-cat /home/klipper/plrtmpA.$$ | sed -n '1,/Z'"${1}"'/p'| tac | grep -m 1 -o '^[T][01]' >> ${PLR_PATH}/"${plr}"
-echo 'G91' >> ${PLR_PATH}/"${plr}"
-echo 'G1 Z-5' >> ${PLR_PATH}/"${plr}"
-echo 'G90' >> ${PLR_PATH}/"${plr}"
-echo 'M106 S204' >> ${PLR_PATH}/"${plr}"
+        if (bed_temp > 0 || print_temp > 0) {
+            if (!cmd_generated) {
+                print "; 温度控制指令"
+                cmd_generated = 1
+            }
+            if (bed_temp > 0) {
+                printf "M140 S%d\nM190 S%d\n", bed_temp, bed_temp
+            }
+            if (print_temp > 0) {
+                printf "M104 S%d\nM109 S%d\n", print_temp, print_temp
+            }
+            exit
+        }
+    }
+' "$sourcefile" >> "${PLR_DIR}/${plr}"
 
-first_line=$(cat /home/klipper/plrtmpA.$$ |sed -e '1,/Z'${1}'/ d' | sed -ne '/ Z/,$ p' | grep -m 1 ' Z' | grep -E 'F[0-9]+' | sed -E 's/F[0-9]+/F3000/g')
-if [ "${first_line}" = "" ];then
-    cat /home/klipper/plrtmpA.$$ | sed -e '1,/Z'${1}'/ d' | sed -ne '/ Z/,$ p' >> ${PLR_PATH}/"${plr}"
-else
-    line=$(cat /home/klipper/plrtmpA.$$ | sed -e '1,/Z'${1}'/ d' | sed -ne '/ Z/,$ p' | grep -m 1 ' Z')
-    z_pos=$(echo "$line" | sed -n 's/.*Z\([0-9.]*\).*/\1/p')
-    if [[ ${1} != $z_pos ]]; then
-        first_line=$(cat /home/klipper/plrtmpA.$$ |sed -e '1,/Z'${1}'/ { /Z'${1}'/!d }' | sed -ne '/ Z/,$ p' | grep -m 1 ' Z' | grep -E 'F[0-9]+' | sed -E 's/F[0-9]+/F3000/g')
-    echo ${first_line} >> ${PLR_PATH}/"${plr}"
-        cat /home/klipper/plrtmpA.$$ | sed -e '1,/Z'${1}'/ { /Z'${1}'/!d }' | sed -ne '/ Z/,$ p' | tail -n +2 >> ${PLR_PATH}/"${plr}"
-    else
-        echo ${first_line} >> ${PLR_PATH}/"${plr}"
-    cat /home/klipper/plrtmpA.$$ | sed -e '1,/Z'${1}'/ d' | sed -ne '/ Z/,$ p' | tail -n +2 >> ${PLR_PATH}/"${plr}"
+awk -v end_line="$line" '
+    BEGIN { last_mode = ""; e_value = "" }
+    # 跳过注释行
+    $0 ~ /^;/ { next }
+    # 只处理到end_line行
+    NR > end_line { exit }
+    # 记录最后出现的模式
+    /M83/ { last_mode = "M83" }
+    /M82/ { last_mode = "M82" }
+    # 捕获end_line行的E值
+    NR == end_line {
+        if (match($0, /E[0-9.]+/)) {
+            e_value = substr($0, RSTART+1, RLENGTH-1)
+        }
+    }
+    # 最终决策
+    END {
+        if (last_mode == "M83") {
+            print "G92 E0"
+            print "M83"
+        }
+        else if (last_mode == "M82") {
+            print "M82"
+            print (e_value != "") ? "G92 E" e_value : "G92 E0"
+        }
+    }
+' "$sourcefile" >> "${PLR_DIR}/${plr}"
+
+target_position=$(awk -v line_num="$line" 'NR == line_num { gsub(/E[0-9.]+/, ""); print }' "$sourcefile")
+{
+    echo 'G91'
+    echo 'G1 Z10'
+    echo 'G90'
+    echo 'G28 X Y'
+    awk -v end_line="$line" '
+        NR > end_line { exit }
+        /ACTIVATE_COPY_MODE|ACTIVATE_MIRROR_MODE/ { print }
+    ' "$sourcefile"
+    echo 'G1 X5'
+    echo 'G1 Y5'
+    awk -v end_line="$line" '
+        NR > end_line {
+            if (found) {
+                print last_match
+            }
+            exit
+        }
+        /^T[01]/ {
+            last_match = $0
+            found = 1
+        }
+        END {
+            if (found) {
+                print last_match
+            }
+        }
+    ' "$sourcefile"
+
+    if [ -n "$target_position" ]; then
+        echo "$target_position"
     fi
-fi
+    echo 'M106 S204'
+} >> "${PLR_DIR}/${plr}"
+
+echo "G1 Z${z_height} F3000" >> "${PLR_DIR}/${plr}"
+
+sed -n "${line},$ p" "${sourcefile}" >> "${PLR_DIR}/${plr}"
+echo "Append the file from ${line} line to ${PLR_DIR}/${plr}" >> "$LOG_FILE"
+
 rm /home/klipper/plrtmpA.$$
+echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> [$(date '+%F %T')] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" >> "$LOG_FILE"

@@ -233,7 +233,7 @@ class PrinterExtruder:
         if diff_r:
             return (self.instant_corner_v / abs(diff_r))**2
         return move.max_cruise_v2
-    def move(self, print_time, move):
+    def move(self, print_time, move, taskline=0):
         axis_r = move.axes_r[3]
         accel = move.accel * axis_r
         start_v = move.start_v * axis_r
@@ -246,7 +246,7 @@ class PrinterExtruder:
                           move.accel_t, move.cruise_t, move.decel_t,
                           move.start_pos[3], 0., 0.,
                           1., can_pressure_advance, 0.,
-                          start_v, cruise_v, accel)
+                          start_v, cruise_v, accel, taskline)
         self.last_position = move.end_pos[3]
     def find_past_position(self, print_time):
         if self.extruder_stepper is None:
