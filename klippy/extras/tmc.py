@@ -130,16 +130,19 @@ class TMCErrorCheck:
             pheaters.register_monitor(config)
     def _query_register(self, reg_info, try_clear=False):
         last_value, reg_name, mask, err_mask, cs_actual_mask = reg_info
+        reactor = self.printer.get_reactor()
         cleared_flags = 0
         count = 0
         while 1:
             try:
                 val = self.mcu_tmc.get_register(reg_name)
+                if val in (None, 0):
+                    reactor.pause(reactor.monotonic() + 0.150)
+                    continue
             except self.printer.command_error as e:
                 count += 1
                 if count < 3 and str(e).startswith("Unable to read tmc uart"):
                     # Allow more retries on a TMC UART read error
-                    reactor = self.printer.get_reactor()
                     reactor.pause(reactor.monotonic() + 0.050)
                     continue
                 raise
@@ -147,7 +150,7 @@ class TMCErrorCheck:
                 fmt = self.fields.pretty_format(reg_name, val)
                 logging.info("TMC '%s' reports %s", self.stepper_name, fmt)
             reg_info[0] = last_value = val
-            if not val & err_mask:
+            if val != -1 and not val & err_mask:
                 if not cs_actual_mask or val & cs_actual_mask:
                     break
                 irun = self.fields.get_field(self.irun_field)
@@ -160,8 +163,10 @@ class TMCErrorCheck:
             count += 1
             if count >= 3:
                 fmt = self.fields.pretty_format(reg_name, val)
-                raise self.printer.command_error("TMC '%s' reports error: %s"
-                                                 % (self.stepper_name, fmt))
+                msg = "TMC '%s' reports error: %s" % (self.stepper_name, fmt)
+                gcode = self.printer.lookup_object('gcode')
+                self.printer.handle_internal_error(msg, gcode, False, False, None)
+                break
             if try_clear and val & err_mask:
                 try_clear = False
                 cleared_flags |= val & err_mask
@@ -184,7 +189,7 @@ class TMCErrorCheck:
         except self.printer.command_error as e:
             self.printer.invoke_shutdown(str(e))
             return self.printer.get_reactor().NEVER
-        return eventtime + 1.
+        return eventtime + 10.
     def stop_checks(self):
         if self.check_timer is None:
             return

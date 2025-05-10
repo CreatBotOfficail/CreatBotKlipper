@@ -20,6 +20,7 @@ class PrinterSkew:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.name = config.get_name()
+        self.current_profile_name = ""
         self.toolhead = None
         self.xy_factor = 0.
         self.xz_factor = 0.
@@ -66,9 +67,9 @@ class PrinterSkew:
         return [skewed_x, skewed_y, pos[2], pos[3]]
     def get_position(self):
         return self.calc_unskew(self.next_transform.get_position())
-    def move(self, newpos, speed):
+    def move(self, newpos, speed, taskline=0):
         corrected_pos = self.calc_skew(newpos)
-        self.next_transform.move(corrected_pos, speed)
+        self.next_transform.move(corrected_pos, speed, taskline)
     def _update_skew(self, xy_factor, xz_factor, yz_factor):
         self.xy_factor = xy_factor
         self.xz_factor = xz_factor
@@ -117,6 +118,7 @@ class PrinterSkew:
     def cmd_SKEW_PROFILE(self, gcmd):
         if gcmd.get('LOAD', None) is not None:
             name = gcmd.get('LOAD')
+            self.current_profile_name = name
             prof = self.skew_profiles.get(name)
             if prof is None:
                 gcmd.respond_info(
@@ -156,7 +158,10 @@ class PrinterSkew:
                 gcmd.respond_info(
                     "skew_correction: No profile named [%s] to remove"
                     % (name))
-
+    def get_status(self, eventtime):
+        return {
+            'current_profile_name': self.current_profile_name
+        }
 
 def load_config(config):
     return PrinterSkew(config)
