@@ -83,7 +83,7 @@ class ForceMove:
         axis_r, accel_t, cruise_t, cruise_v = calc_move_time(dist, speed, accel)
         print_time = toolhead.get_last_move_time()
         self.trapq_append(self.trapq, print_time, accel_t, cruise_t, accel_t,
-                          0., 0., 0., axis_r, 0., 0., 0., cruise_v, accel)
+                          0., 0., 0., axis_r, 0., 0., 0., cruise_v, accel, 0.)
         print_time = print_time + accel_t + cruise_t + accel_t
         stepper.generate_steps(print_time)
         self.trapq_finalize_moves(self.trapq, print_time + 99999.9,
@@ -131,8 +131,19 @@ class ForceMove:
         x = gcmd.get_float('X', curpos[0])
         y = gcmd.get_float('Y', curpos[1])
         z = gcmd.get_float('Z', curpos[2])
-        logging.info("SET_KINEMATIC_POSITION pos=%.3f,%.3f,%.3f", x, y, z)
-        toolhead.set_position([x, y, z, curpos[3]], homing_axes=(0, 1, 2))
+        set_homed = gcmd.get('SET_HOMED', 'xyz').lower()
+        set_homed_axes = "".join([a for a in "xyz" if a in set_homed])
+        if gcmd.get('CLEAR_HOMED', None) is None:
+            # "CLEAR" is an alias for "CLEAR_HOMED"; should deprecate
+            clear_homed = gcmd.get('CLEAR', '').lower()
+        else:
+            clear_homed = gcmd.get('CLEAR_HOMED', '').lower()
+        clear_homed_axes = "".join([a for a in "xyz" if a in clear_homed])
+        logging.info("SET_KINEMATIC_POSITION pos=%.3f,%.3f,%.3f"
+                     " set_homed=%s clear_homed=%s",
+                     x, y, z, set_homed_axes, clear_homed_axes)
+        toolhead.set_position([x, y, z, curpos[3]], homing_axes=set_homed_axes)
+        toolhead.get_kinematics().clear_homing_state(clear_homed_axes)
 
 def load_config(config):
     return ForceMove(config)

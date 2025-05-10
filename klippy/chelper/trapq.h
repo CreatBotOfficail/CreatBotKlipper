@@ -13,6 +13,7 @@ struct coord {
 };
 
 struct move {
+    double taskline;
     double print_time, move_t;
     double start_v, half_accel;
     struct coord start_pos, axes_r;
@@ -42,7 +43,7 @@ void trapq_append(struct trapq *tq, double print_time
                   , double accel_t, double cruise_t, double decel_t
                   , double start_pos_x, double start_pos_y, double start_pos_z
                   , double axes_r_x, double axes_r_y, double axes_r_z
-                  , double start_v, double cruise_v, double accel);
+                  , double start_v, double cruise_v, double accel, double taskline);
 void trapq_finalize_moves(struct trapq *tq, double print_time
                           , double clear_history_time);
 void trapq_set_position(struct trapq *tq, double print_time
