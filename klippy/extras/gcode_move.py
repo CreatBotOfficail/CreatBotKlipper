@@ -69,7 +69,7 @@ class GCodeMove:
                      self.extrude_factor, self.speed)
     def _handle_activate_extruder(self):
         self.reset_last_position()
-        self.extrude_factor = 1.
+        # self.extrude_factor = 1.
         self.base_position[3] = self.last_position[3]
     def _handle_home_rails_end(self, homing_state, rails):
         self.reset_last_position()
