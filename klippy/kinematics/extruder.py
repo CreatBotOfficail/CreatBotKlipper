@@ -136,6 +136,7 @@ class PrinterExtruder:
     def __init__(self, config, extruder_num):
         self.printer = config.get_printer()
         self.name = config.get_name()
+        self.err_count = 0
         self.last_position = 0.
         # Setup hotend heater
         pheaters = self.printer.load_object(config, 'heaters')
@@ -177,12 +178,12 @@ class PrinterExtruder:
             self.extruder_stepper = ExtruderStepper(config)
             self.extruder_stepper.stepper.set_trapq(self.trapq)
         # Register commands
-        gcode = self.printer.lookup_object('gcode')
+        self.gcode = self.printer.lookup_object('gcode')
         if self.name == 'extruder':
             toolhead.set_extruder(self, 0.)
-            gcode.register_command("M104", self.cmd_M104)
-            gcode.register_command("M109", self.cmd_M109)
-        gcode.register_mux_command("ACTIVATE_EXTRUDER", "EXTRUDER",
+            self.gcode.register_command("M104", self.cmd_M104)
+            self.gcode.register_command("M109", self.cmd_M109)
+        self.gcode.register_mux_command("ACTIVATE_EXTRUDER", "EXTRUDER",
                                    self.name, self.cmd_ACTIVATE_EXTRUDER,
                                    desc=self.cmd_ACTIVATE_EXTRUDER_help)
     def update_move_time(self, flush_time, clear_history_time):
@@ -204,16 +205,28 @@ class PrinterExtruder:
     def check_move(self, move):
         axis_r = move.axes_r[3]
         if not self.heater.can_extrude:
-            raise self.printer.command_error(
-                "Extrude below minimum temp\n"
-                "See the 'min_extrude_temp' config option for details")
+            msg = (f"Extrude below minimum extrude temp of {self.heater.min_extrude_temp}℃")
+            if self.printer.is_printing():
+                self.err_count += 1
+                if self.err_count > 100:
+                    self.err_count = 0
+                    self.gcode._respond_error(msg)
+            else:
+                raise self.printer.command_error(f"Extrude below minimum extrude temp of {self.heater.min_extrude_temp}℃")
         if (not move.axes_d[0] and not move.axes_d[1]) or axis_r < 0.:
             # Extrude only move (or retraction move) - limit accel and velocity
             if abs(move.axes_d[3]) > self.max_e_dist:
-                raise self.printer.command_error(
+                msg = (
                     "Extrude only move too long (%.3fmm vs %.3fmm)\n"
                     "See the 'max_extrude_only_distance' config"
                     " option for details" % (move.axes_d[3], self.max_e_dist))
+                if self.printer.is_printing():
+                    self.err_count += 1
+                    if self.err_count > 100:
+                        self.err_count = 0
+                        self.gcode._respond_error(msg)
+                else:
+                    raise self.printer.command_error(msg)
             inv_extrude_r = 1. / abs(axis_r)
             move.limit_speed(self.max_e_velocity * inv_extrude_r,
                              self.max_e_accel * inv_extrude_r)

@@ -76,6 +76,9 @@ class RunoutHelper:
         is_printing = idle_timeout.get_status(now)["state"] == "Printing"
         # Perform filament action associated with status change (if any)
         if is_filament_present:
+            if hasattr(self, 'airpump'):
+                self.min_event_systime = self.reactor.NEVER
+                self.reactor.register_callback(self._insert_pump_event_handler)
             if not is_printing and self.insert_gcode is not None:
                 # insert detected
                 self.min_event_systime = self.reactor.NEVER
