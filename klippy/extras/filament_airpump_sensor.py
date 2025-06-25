@@ -25,6 +25,11 @@ class AirPump:
         self.airpump_mcu = self.airpump_pin.get_mcu()
         self.timeout_event_handler = timeout_event_handler
 
+        self.motor_pin = None
+        motor_pin = config.get('motor_pin')
+        self.motor_pin = ppins.setup_pin('digital_out', motor_pin)
+        self.motor_pin.setup_max_duration(0.)
+
     def set_power(self, power, eventtime):
         print_time = self.airpump_mcu.estimated_print_time(eventtime + 0.1)
         logging.info(f"set air pump to {power} at {print_time}")
@@ -34,6 +39,7 @@ class AirPump:
                 self.is_running = True
                 self.timeout_timer = self.reactor.register_timer(
                     self._check_timeout, self.start_time + self.max_run_time)
+                self.motor_pin.set_digital(print_time, 1)
                 self.airpump_pin.set_digital(print_time, 1)
         else:
             if self.timeout_timer is not None:
@@ -41,6 +47,7 @@ class AirPump:
                 self.timeout_timer = None
             self.is_running = False
             self.start_time = None
+            self.motor_pin.set_digital(print_time, 0)
             self.airpump_pin.set_digital(print_time, 0)
 
     def _check_timeout(self, eventtime):
