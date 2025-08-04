@@ -23,6 +23,15 @@ class VirtualSD:
         self.sdcard_dirname = os.path.normpath(os.path.expanduser(sd))
         self.current_file = None
         self.file_position = self.file_size = 0
+        # File caching - prevent USB drive disconnection issues
+        self.cache_enabled = config.getboolean('cache_enabled', False)
+        self.cache_path = config.get('cache_path', '~/printer_data/cache')
+        self.cache_path = os.path.normpath(os.path.expanduser(self.cache_path))
+        self.cached_file = None
+        self.original_file_path = None
+        # Background copy related
+        self.copy_thread = None
+        self.copy_complete = False
         # Print Stat Tracking
         self.print_stats = self.printer.load_object(config, 'print_stats')
         # Work timer
@@ -104,7 +113,9 @@ class VirtualSD:
             'file_size': self.file_size,
         }
     def file_path(self):
-        if self.current_file:
+        if self.original_file_path:
+            return self.original_file_path
+        elif self.current_file:
             return self.current_file.name
         return None
     def progress(self):
@@ -132,6 +143,7 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
             self.print_stats.note_cancel()
+        self._cleanup_cache(clean_files=False)
         self.file_position = self.file_size = 0
         self.file_line = self.file_runline = 0
     # G-Code commands
@@ -142,10 +154,133 @@ class VirtualSD:
             self.do_pause()
             self.current_file.close()
             self.current_file = None
+        self.original_file_path = None
         self.file_position = self.file_size = 0
         self.file_line = self.file_runline = 0
         self.print_stats.reset()
         self.printer.send_event("virtual_sdcard:reset_file")
+    
+    def _cleanup_cache(self, clean_files=True):
+        if self.copy_thread and self.copy_thread.is_alive():
+            try:
+                self.copy_thread.join(timeout=1.0)
+            except:
+                pass
+
+        self.copy_thread = None
+        self.copy_complete = False
+
+        if clean_files and os.path.exists(self.cache_path):
+            try:
+                import glob
+                cache_files = glob.glob(os.path.join(self.cache_path, "*"))
+                for cache_file in cache_files:
+                    os.remove(cache_file)
+            except:
+                pass
+
+        self.cached_file = None
+    
+    def _is_removable_media(self, file_path):
+        """Detect if file is on removable storage device"""
+        try:
+            import re
+            import subprocess
+
+            # Find device mount point
+            result = subprocess.run(['findmnt', '-n', '-o', 'SOURCE', '--target', file_path],
+                                   capture_output=True, text=True, timeout=5)
+            if result.returncode != 0:
+                return False
+
+            device_path = result.stdout.strip()
+            if not device_path:
+                return False
+
+            # Extract block device name (e.g., /dev/sdb1 -> sdb)
+            match = re.search(r'/dev/([a-z]+)', device_path)
+            if not match:
+                return False
+
+            block_device = match.group(1)
+
+            removable_path = f'/sys/block/{block_device}/removable'
+            if os.path.exists(removable_path):
+                with open(removable_path, 'r') as f:
+                    return f.read().strip() == '1'
+
+        except:
+            pass
+
+        return False
+
+    def async_copy_file(self, source_file, cache_file, original_file):
+        try:
+            with open(source_file, 'rb') as src, open(cache_file, 'wb') as dst:
+                chunk_size = 64 * 1024  # 64KB chunks
+                while True:
+                    chunk = src.read(chunk_size)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    dst.flush()
+
+            self.copy_complete = True
+
+            if original_file:
+                try:
+                    original_file.close()
+                except:
+                    pass
+
+        except:
+            self.copy_complete = False
+
+    def _wait_for_cache_file(self, cache_file_path):
+        import time
+        time.sleep(0.1)
+        for _ in range(100):  # Wait up to 10 seconds
+            if os.path.exists(cache_file_path):
+                try:
+                    return io.open(cache_file_path, 'r', newline='')
+                except:
+                    pass
+            time.sleep(0.1)
+        return None
+
+    def _handle_file_caching(self, gcmd, fname, f):
+        is_removable = self._is_removable_media(fname)
+        should_cache = self.cache_enabled and is_removable
+
+        if should_cache:
+            
+            import threading
+            self._cleanup_cache(clean_files=True)  # Only clean files when starting new cache
+            try:
+                if not os.path.exists(self.cache_path):
+                    os.makedirs(self.cache_path)
+
+                cache_file = os.path.join(self.cache_path, os.path.basename(fname))
+                self.cached_file = cache_file
+
+                self.copy_thread = threading.Thread(
+                    target=self.async_copy_file,
+                    args=(fname, cache_file, f),
+                    daemon=True
+                )
+                self.copy_thread.start()
+
+                cache_file_obj = self._wait_for_cache_file(cache_file)
+                if cache_file_obj:
+                    self.current_file = cache_file_obj
+                else:
+                    self.cached_file = None
+                    gcmd.respond_raw("Cache file creation failed")
+
+            except:
+                self.cached_file = None
+                gcmd.respond_raw("Cache failed, ensure USB connection is stable")
+
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
         "if necessary"
     def _get_runline(self):
@@ -219,9 +354,11 @@ class VirtualSD:
         gcmd.respond_raw("File opened:%s Size:%d" % (filename, fsize))
         gcmd.respond_raw("File selected")
         self.current_file = f
+        self.original_file_path = f.name
         self.file_position = 0
         self.file_size = fsize
         self.print_stats.set_current_file(filename)
+        self._handle_file_caching(gcmd, fname, f)
     def cmd_M24(self, gcmd):
         # Start/resume SD print
         self.do_resume()
@@ -276,6 +413,7 @@ class VirtualSD:
                     # End of file
                     self.current_file.close()
                     self.current_file = None
+                    self._cleanup_cache(clean_files=True)
                     logging.info("Finished SD card print")
                     self.gcode.respond_raw("Done printing file")
                     break
