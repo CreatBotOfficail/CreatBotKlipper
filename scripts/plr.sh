@@ -69,20 +69,24 @@ echo "When power outage, it was parsing the $target_pos byte and the $line line"
 line="$run_line"
 
 z_height=$(awk -v target_line="$line" '
-    BEGIN { found = 0 }
-    NR <= target_line {
-        if ($0 ~ /^;[[:space:]]*Z:/) {
-            split($0, parts, /:[[:space:]]*/)
-            z_val = parts[2]
-            found = 1
+  BEGIN { found = 0 }
+  NR <= target_line {
+    if ($0 ~ /^[[:space:]]*G[01][[:space:]]+.*[zZ][[:space:]]*[-+]?[0-9]/) {
+      if (match($0, /[zZ][[:space:]]*[-+]?[0-9]*\.?[0-9]+/)) {
+        z_str = substr($0, RSTART, RLENGTH)
+        if (match(z_str, /[-+]?[0-9]*\.?[0-9]+/)) {
+          z_val = substr(z_str, RSTART, RLENGTH)
+          found = 1
         }
+      }
     }
-    NR == target_line {
-        if (found) {
-            print z_val
-        }
-        exit
+  }
+  NR == target_line {
+    if (found) {
+      print z_val
     }
+    exit
+  }
 ' "$sourcefile")
 echo "When power outage, the printing height: $z_height, the offset value: $z_offset" >> "$LOG_FILE"
 
