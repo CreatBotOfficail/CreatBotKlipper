@@ -322,26 +322,29 @@ command_stepper_get_position(uint32_t *args)
 }
 DECL_COMMAND(command_stepper_get_position, "stepper_get_position oid=%c");
 
-// Report the current line of the stepper
+// Report the min non-zero of the stepper's queue
 void
 command_stepper_get_taskline(uint32_t *args)
 {
     uint8_t oid = args[0];
     struct stepper *s = stepper_oid_lookup(oid);
-    uint32_t max_taskline = 0;
+    uint32_t min_nonzero = 0;
     irq_disable();
     struct move_node *mn = s->mq.first;
     while (mn) {
         struct stepper_move *m = container_of(mn, struct stepper_move, node);
-        if(m->taskline){
-            if (m->taskline > max_taskline)
-                max_taskline = m->taskline;
-            break;
-        }
+        uint32_t current = m->taskline;
+        if (current != 0) {
+            if (min_nonzero == 0) {
+                min_nonzero = current;
+            } else if (current < min_nonzero) {
+                min_nonzero = current;
+            }
+        }     
         mn = mn->next;
     }
     irq_enable();
-    sendf("stepper_taskline line=%u", max_taskline);
+    sendf("stepper_taskline line=%u", min_nonzero);
 }
 DECL_COMMAND(command_stepper_get_taskline, "stepper_get_taskline oid=%c");
 
@@ -367,6 +370,17 @@ stepper_stop(struct trsync_signal *tss, uint8_t reason)
         move_free(m);
     }
 }
+
+void
+command_stepper_stop(uint32_t *args)
+{
+    uint8_t oid = args[0];
+    struct stepper *s = stepper_oid_lookup(oid);
+    irq_disable();
+    stepper_stop(&s->stop_signal, 0);
+    irq_enable();
+}
+DECL_COMMAND(command_stepper_stop, "stepper_stop oid=%c");
 
 // Set the stepper to stop on a "trigger event" (used in homing)
 void

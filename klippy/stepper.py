@@ -41,6 +41,7 @@ class MCU_stepper:
         self._step_both_edge = self._req_step_both_edge = False
         self._mcu_position_offset = 0.
         self.taskline = 0
+        self._is_pause_stop = False
         self._reset_cmd_tag = self._get_position_cmd = None
         self._active_callbacks = []
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -123,6 +124,7 @@ class MCU_stepper:
         self._get_taskline_cmd = self._mcu.lookup_query_command(
             "stepper_get_taskline oid=%c",
             "stepper_taskline line=%u")
+        self._set_stop_cmd = self._mcu.lookup_command("stepper_stop oid=%c")
         max_error = self._mcu.get_max_stepper_error()
         max_error_ticks = self._mcu.seconds_to_clock(max_error)
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -159,7 +161,11 @@ class MCU_stepper:
         sk = self._stepper_kinematics
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.itersolve_set_position(sk, coord[0], coord[1], coord[2])
-        self._set_mcu_position(mcu_pos)
+        if not self._is_pause_stop:
+            logging.info(f"{self.get_name()} set position:{mcu_pos}")
+            self._set_mcu_position(mcu_pos)
+        else:
+            self._is_pause_stop = False
     def get_commanded_position(self):
         ffi_main, ffi_lib = chelper.get_ffi()
         return ffi_lib.itersolve_get_commanded_pos(self._stepper_kinematics)
@@ -194,6 +200,37 @@ class MCU_stepper:
             return 0
         params = self._get_taskline_cmd.send([self._oid])
         return int(params['line'])
+
+    def set_stepper_stop(self):
+        if self._mcu.is_fileoutput():
+            return 0
+        self._set_stop_cmd.send([self._oid])
+
+    def set_stepper_pause(self):
+        if self._mcu.is_fileoutput():
+            return
+        ffi_main, ffi_lib = chelper.get_ffi()
+        ret = ffi_lib.stepcompress_reset(self._stepqueue, 0)
+        if ret:
+            raise error("stepcompress_reset failed")
+        data = (self._reset_cmd_tag, self._oid, 0)
+        ret = ffi_lib.stepcompress_queue_msg(self._stepqueue, data, len(data))
+        if ret:
+            raise error("Internal error in stepcompress")
+        params = self._get_position_cmd.send([self._oid])
+        pause_pos = params['pos']
+        if self._invert_dir:
+            pause_pos = -pause_pos
+        print_time = self._mcu.estimated_print_time(params['#receive_time']+0.001)
+        clock = self._mcu.print_time_to_clock(print_time)
+        ret = ffi_lib.stepcompress_set_last_position(self._stepqueue, clock,
+                                                     pause_pos)
+        if ret:
+            raise error("Internal error in stepcompress")
+        self._mcu.get_printer().send_event("stepper:sync_mcu_position", self)
+        self._is_pause_stop = True
+        return pause_pos
+
     def set_stepper_kinematics(self, sk):
         old_sk = self._stepper_kinematics
         mcu_pos = 0

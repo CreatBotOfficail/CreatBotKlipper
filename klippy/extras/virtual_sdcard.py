@@ -42,6 +42,7 @@ class VirtualSD:
         self.file_runline = 0
         self.linfo = ""
         self.work_timer = None
+        self.toolhead_pos = None
         # Error handling
         gcode_macro = self.printer.load_object(config, 'gcode_macro')
         self.on_error_gcode = gcode_macro.load_template(
@@ -129,8 +130,11 @@ class VirtualSD:
         if self.work_timer is not None:
             self.must_pause_work = True
             self._get_runline()
+            self._set_quick_pause()
             while self.work_timer is not None and not self.cmd_from_sd:
                 self.reactor.pause(self.reactor.monotonic() + .001)
+            self.file_position = self._get_position_by_line(self.file_runline)
+            self.file_line = self.file_runline
     def do_resume(self):
         if self.work_timer is not None:
             raise self.gcode.error("SD busy")
@@ -290,9 +294,66 @@ class VirtualSD:
         kin = toolhead.get_kinematics()
         steppers = kin.get_steppers()
         linfo = [(s.get_name(), s.get_stepper_taskline()) for s in steppers if s.get_name() != "stepper_z"]
-        max_position = max(position for _, position in linfo)
+        positions = [position for _, position in linfo if position != 0]
+        max_position = min(positions) if positions else 0
         self.linfo = linfo
         self.file_runline = max_position
+
+    def _set_quick_pause(self):
+        toolhead = self.printer.lookup_object('toolhead')
+        kin = toolhead.get_kinematics()
+        toolhead.flush_step_generation()
+        steppers = kin.get_steppers()
+
+        def get_extruders():
+            extruders = []
+            for i in range(99):
+                extruder_name = "extruder" if i == 0 else f"extruder{i}"
+                extruder = self.printer.lookup_object(extruder_name, None)
+                if extruder is None:
+                    break
+                extruders.append(extruder)
+            return extruders
+        for extruder in get_extruders():
+            extruder.extruder_stepper.stepper.set_stepper_stop()
+        for stepper in steppers:
+            stepper.set_stepper_stop()
+        for extruder in get_extruders():
+            extruder.extruder_stepper.stepper.set_stepper_pause()
+        kin_spos = {
+            stepper.get_name(): stepper.mcu_to_commanded_position(stepper.set_stepper_pause())
+            for stepper in steppers
+        }
+        self.toolhead_pos = kin.calc_position(kin_spos)
+        self._set_kinematic_position(self.toolhead_pos)
+
+    def _get_position_by_line(self, target_line):
+        if target_line <= 0:
+            return 0
+        self.current_file.seek(0)
+        current_line = 0
+        position = 0
+        while True:
+            line = self.current_file.readline()
+            if not line:
+                raise ValueError(f"Target line number {target_line} exceeds the total number of lines in the file")
+            if current_line == target_line - 1:
+                logging.info(f"Starting position of target line {target_line}: {position}")
+                return position
+            if sys.version_info.major >= 3:
+                line_bytes = len(line.encode('utf-8'))
+            else:
+                line_bytes = len(line)
+            position += line_bytes
+            current_line += 1
+
+    def _set_kinematic_position(self, pos):
+        toolhead = self.printer.lookup_object('toolhead')
+        toolhead.get_last_move_time()
+        curpos = toolhead.get_position()
+        logging.info("set kinematic position pos=%.3f,%.3f,%.3f,%.3f",
+                     pos[0], pos[1], pos[2], curpos[3])
+        toolhead.set_position([pos[0], pos[1], pos[2], curpos[3]], homing_axes='xyz')
 
     def cmd_GET_TASKLINE(self, gcmd):
         if not self.must_pause_work:
