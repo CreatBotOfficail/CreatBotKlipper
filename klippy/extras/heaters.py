@@ -41,8 +41,6 @@ class Heater:
         self.inv_smooth_time = 1. / self.smooth_time
         self.verify_mainthread_time = -999.
         self.is_waiting = False
-        self.auto_turnoff_delay = config.getfloat('auto_turnoff_delay', 0., minval=0.)
-        self.auto_turnoff_timer = None
         self.lock = threading.Lock()
         self.last_temp = self.smoothed_temp = self.target_temp = 0.
         self.last_temp_time = 0.
@@ -97,10 +95,6 @@ class Heater:
         #logging.debug("temp: %.3f %f = %f", read_time, temp)
     def _handle_shutdown(self):
         self.verify_mainthread_time = -999.
-        if self.auto_turnoff_timer is not None:
-            reactor = self.printer.get_reactor()
-            reactor.unregister_timer(self.auto_turnoff_timer)
-            self.auto_turnoff_timer = None
     # External commands
     def get_name(self):
         return self.name
@@ -117,21 +111,6 @@ class Heater:
                 % (degrees, self.min_temp, self.max_temp))
         with self.lock:
             self.target_temp = degrees
-    def set_auto_turnoff_timer(self, turnoff_time):
-        if self.auto_turnoff_timer is not None:
-            reactor = self.printer.get_reactor()
-            reactor.unregister_timer(self.auto_turnoff_timer)
-            self.auto_turnoff_timer = None
-        if turnoff_time and turnoff_time > 0:
-            reactor = self.printer.get_reactor()
-            waketime = reactor.monotonic() + turnoff_time
-            self.auto_turnoff_timer = reactor.register_timer(
-                self._auto_turnoff_callback, waketime)
-    def _auto_turnoff_callback(self, eventtime):
-        with self.lock:
-            self.target_temp = 0.
-        self.auto_turnoff_timer = None
-        return self.printer.get_reactor().NEVER
     def get_temp(self, eventtime):
         print_time = self.mcu_pwm.get_mcu().estimated_print_time(eventtime) - 5.
         with self.lock:
@@ -173,25 +152,9 @@ class Heater:
     cmd_SET_HEATER_TEMPERATURE_help = "Sets a heater temperature"
     def cmd_SET_HEATER_TEMPERATURE(self, gcmd):
         temp = gcmd.get_float('TARGET', 0.)
-        turnoff_time = gcmd.get_float('TIME', None, minval=0.)
         pheaters = self.printer.lookup_object('heaters')
         pheaters.set_temperature(self, temp)
 
-        if turnoff_time is not None:
-            if temp > 0:
-                self.set_auto_turnoff_timer(turnoff_time)
-                if turnoff_time > 0:
-                    gcmd.respond_info("Heater %s set to %.1fC with %.1f second auto turnoff" 
-                                     % (self.short_name, temp, turnoff_time))
-            else:
-                self.set_auto_turnoff_timer(0)
-        else:
-            if temp > 0 and self.auto_turnoff_delay > 0:
-                self.set_auto_turnoff_timer(self.auto_turnoff_delay)
-                gcmd.respond_info("Heater %s set to %.1fC with %.1f second auto turnoff" 
-                                 % (self.short_name, temp, self.auto_turnoff_delay))
-            elif temp <= 0:
-                self.set_auto_turnoff_timer(0)
 
 ######################################################################
 # Bang-bang control algo
