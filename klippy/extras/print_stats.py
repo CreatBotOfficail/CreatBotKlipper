@@ -7,6 +7,7 @@
 class PrintStats:
     def __init__(self, config):
         printer = config.get_printer()
+        self.printer = printer
         self.gcode_move = printer.load_object(config, 'gcode_move')
         self.reactor = printer.get_reactor()
         self.reset()
@@ -64,6 +65,7 @@ class PrintStats:
             self.init_duration = self.total_duration - \
                 self.prev_pause_duration
         self.print_start_time = None
+        self.printer.send_event("print_stats:finish", state)
     cmd_SET_PRINT_STATS_INFO_help = "Pass slicer info like layer act and " \
                                     "total to klipper"
     def cmd_SET_PRINT_STATS_INFO(self, gcmd):

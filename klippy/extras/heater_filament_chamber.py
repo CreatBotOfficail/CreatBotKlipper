@@ -18,6 +18,8 @@ class PrinterHeaterFilamentChamber:
         self.original_set_temp = self.heater.set_temp
 
         self.printer.register_event_handler("klippy:ready", self._handle_ready)
+        self.printer.register_event_handler(
+            "print_stats:finish", self._handle_print_stats_finish)
 
     def _handle_ready(self):
         try:
@@ -93,6 +95,29 @@ class PrinterHeaterFilamentChamber:
         self.original_set_temp(0.)
         self._clear_timer_state()
         return self.reactor.NEVER
+
+    def _handle_print_stats_finish(self, state):
+        try:
+            save_vars = self.printer.lookup_object('save_variables', None)
+            if save_vars is None:
+                logging.debug(
+                    "save_variables module not available, no action will be taken for the filament chamber")
+                return
+
+            status = save_vars.get_status(self.reactor.monotonic())
+            variables = status.get('variables', {})
+
+            auto_off = variables.get("filament_chamber_auto_cool", True)
+            logging.debug("Filament chamber auto cooling is %s",
+                          "enabled" if auto_off else "disabled")
+            if auto_off:
+                logging.info(
+                    "Auto cooling enabled - turning off filament chamber heater")
+                self.heater.set_temp(0.)
+                self._stop_turnoff_timer()
+        except Exception as e:
+            logging.error(
+                "Failed to process print completion for filament chamber: %s", str(e))
 
 
 def load_config(config):
