@@ -315,6 +315,8 @@ class PrinterHeaters:
                 'available_monitors': self.available_monitors}
     def turn_off_all_heaters(self, print_time=0.):
         for heater in self.heaters.values():
+            if heater.name == 'filament_chamber' or heater.short_name == 'FC':
+                continue
             heater.set_temp(0.)
     cmd_TURN_OFF_HEATERS_help = "Turn off all heaters"
     def cmd_TURN_OFF_HEATERS(self, gcmd):
