@@ -420,6 +420,37 @@ class ProbeEddyProbeResult:
 
         return f"{value} ({extra}, {self.min_value:.3f} to {self.max_value:.3f}, [{self.stddev:.3f}])"
 
+# Helper to implement common probing commands
+class EddyProbeCommandHelper(probe.ProbeCommandHelper):
+    def __init__(self, config, probe, query_endstop=None):
+        self.printer = config.get_printer()
+        self.probe = probe
+        self.query_endstop = query_endstop
+        self.last_state = False
+        self.last_z_result = 0.
+        self.z_offset = self.avg_value = 0.
+        self.name = config.get_name()
+        self.register_commands()
+
+    def register_commands(self):
+        # Register commands
+        gcode = self.printer.lookup_object('gcode')
+        # QUERY_PROBE command
+        gcode.register_command('EDDY_QUERY_PROBE',
+                                    self.cmd_QUERY_PROBE,
+                                    desc=self.cmd_QUERY_PROBE_help)
+        # PROBE command
+        gcode.register_command('EDDY_PROBE',
+                                    self.cmd_PROBE,
+                                    desc=self.cmd_PROBE_help)
+        # PROBE_CALIBRATE command
+        gcode.register_command('EDDY_PROBE_CALIBRATE',
+                                    self.cmd_PROBE_CALIBRATE,
+                                    desc=self.cmd_PROBE_CALIBRATE_help)
+        # Other commands
+        gcode.register_command('EDDY_PROBE_ACCURACY',
+                                   self.cmd_PROBE_ACCURACY,
+                               desc=self.cmd_PROBE_ACCURACY_help)
 
 @final
 class ProbeEddy:
@@ -501,6 +532,7 @@ class ProbeEddy:
         self._sampler: ProbeEddySampler = None
         self._last_sampler: ProbeEddySampler = None
         self.save_samples_path = None
+        self._stddev = 0.0
 
         # The last tap Z value, in absolute axis terms. Used for status.
         self._last_tap_z = 0.0
@@ -510,13 +542,13 @@ class ProbeEddy:
 
         # This class emulates "PrinterProbe". We use some existing helpers to implement
         # functionality like start_session
-        self._printer.add_object("probe", self)
+        self._printer.add_object("eddy_probe", self)
 
         self._bed_mesh_helper = BedMeshScanHelper(self, config)
 
         # TODO: get rid of this
         if hasattr(probe, "ProbeCommandHelper"):
-            self._cmd_helper = probe.ProbeCommandHelper(config, self, self._endstop_wrapper.query_endstop)
+            self._cmd_helper = EddyProbeCommandHelper(config, self, self._endstop_wrapper.query_endstop)
         else:
             self._cmd_helper = None
 
@@ -607,9 +639,8 @@ class ProbeEddy:
             self.cmd_TEST_DRIVE_CURRENT,
             "Test a drive current.",
         )
-        gcode.register_command("Z_OFFSET_APPLY_PROBE", None)
         gcode.register_command(
-            "Z_OFFSET_APPLY_PROBE",
+            "EDDY_Z_OFFSET_APPLY_PROBE",
             self.cmd_Z_OFFSET_APPLY_PROBE,
             "Apply the current G-Code Z offset to tap_adjust_z",
         )
@@ -852,7 +883,7 @@ class ProbeEddy:
     def cmd_PROBE_ACCURACY(self, gcmd: GCodeCommand):
         if not self._z_homed():
             raise self._printer.command_error("Must home Z before PROBE_ACCURACY")
-
+        self._stddev = 0.0
         # How long to read at each sample time
         duration: float = gcmd.get_float("DURATION", 0.100, above=0.0)
         # whether to check +/- 1mm positions for accuracy
@@ -917,6 +948,7 @@ class ProbeEddy:
                 avg_range = np.mean(ranges)
                 avg_from_z = np.mean(from_zs)
                 stddev = (np.sum(stddev_sums) / stddev_count) ** 0.5
+                self._stddev = format(stddev, ".3f")
                 gcmd.respond_info(f"Probe spread: {avg_range:.3f}, z deviation: {avg_from_z:.3f}, stddev: {stddev:.3f}")
 
         finally:
@@ -1336,7 +1368,7 @@ class ProbeEddy:
 
         if times is None:
             if report_errors:
-                self._log_error(f"Drive current {drive_current}: No samples collected. This could be a hardware issue or an incorrect drive current.")
+                self._log_msg(f"Drive current {drive_current}: No samples collected. This could be a hardware issue or an incorrect drive current.")
             else:
                 self._log_warning(f"Drive current {drive_current}: Warning: no samples collected.")
             return None, None, None
@@ -1455,6 +1487,7 @@ class ProbeEddy:
             {
                 "name": self._full_name,
                 "home_trigger_height": float(self.params.home_trigger_height),
+                "accuracy_stddev":float(self._stddev),
                 "tap_offset": float(self._tap_offset),
                 "tap_adjust_z": float(self._tap_adjust_z),
                 "last_probe_result": float(self._last_probe_result),
@@ -2327,7 +2360,7 @@ class ProbeEddyEndstopWrapper:
         self._sampler: ProbeEddySampler = None
 
         # Register z_virtual_endstop pin
-        self._printer.lookup_object("pins").register_chip("probe", self)
+        self._printer.lookup_object("pins").register_chip("eddy", self)
         # Register event handlers
         self._printer.register_event_handler("klippy:mcu_identify", self._handle_mcu_identify)
         self._printer.register_event_handler("homing:homing_move_begin", self._handle_homing_move_begin)
@@ -2939,14 +2972,14 @@ class ProbeEddyFrequencyMap:
         # Check if our calibration is good enough
         if report_errors:
             if max_height < 2.5:  # we really can't do anything with this
-                self._eddy._log_error(
+                self._eddy._log_msg(
                     f"Drive current {drive_current} error: max height for valid samples is too low: {max_height:.3f} < 2.5. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
                     return None, None
 
             if min_height > 0.65:  # this is a bit arbitrary; but if it's this far off we shouldn't trust it
-                self._eddy._log_error(
+                self._eddy._log_msg(
                     f"Drive current {drive_current} error: min height for valid samples is too high: {min_height:.3f} > 0.65. Possible causes: bad drive current, bad sensor mount height."
                 )
                 if not self._eddy.params.allow_unsafe:
@@ -3285,7 +3318,7 @@ def np_rmse(p, x, y):
 def bed_mesh_ProbeManager_start_probe_override(self, gcmd):
     method = gcmd.get("METHOD", "automatic").lower()
     can_scan = False
-    pprobe = self.printer.lookup_object("probe", None)
+    pprobe = self.printer.lookup_object("eddy_probe", None)
     if pprobe is not None:
         probe_name = pprobe.get_status(None).get("name", "")
         can_scan = "eddy" in probe_name
