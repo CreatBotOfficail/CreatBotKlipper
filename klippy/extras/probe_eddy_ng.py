@@ -1112,18 +1112,24 @@ class ProbeEddy:
         # Now reset the axis so that we have a full range to calibrate with
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
-        # XXX This is proably not correct for some printers?
-        zrange = th.get_kinematics().rails[2].get_range()
-        th_pos[2] = zrange[1] - 20.0
-        self._set_toolhead_position(th_pos, [2])
+        have_probe = self._printer.lookup_object("probe")
+        if self._z_homed() and have_probe is not None:
+            kin = self._toolhead.get_kinematics()
+            th.manual_move([None, None, 0.0],self.params.lift_speed,)
+            self.cmd_SETUP_next(gcmd, kin, True)
+        else:
+            # XXX This is proably not correct for some printers?
+            zrange = th.get_kinematics().rails[2].get_range()
+            th_pos[2] = zrange[1] - 20.0
+            self._set_toolhead_position(th_pos, [2])
 
-        manual_probe.ManualProbeHelper(
-            self._printer,
-            gcmd,
-            lambda kin_pos: self.cmd_SETUP_next(gcmd, kin_pos),
-        )
+            manual_probe.ManualProbeHelper(
+                self._printer,
+                gcmd,
+                lambda kin_pos: self.cmd_SETUP_next(gcmd, kin_pos)
+            )
 
-    def cmd_SETUP_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]]):
+    def cmd_SETUP_next(self, gcmd: GCodeCommand, kin_pos: Optional[List[float]], auto: bool =False):
         if kin_pos is None:
             # User cancelled ManualProbeHelper
             self._z_not_homed()
@@ -1136,7 +1142,8 @@ class ProbeEddy:
         # to make the following code easier, so it can assume z=0 is actually real zero.
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
-        th_pos[2] = 0.0
+        if not auto:
+            th_pos[2] = 0.0
         self._set_toolhead_position(th_pos, [2])
 
         # Note that the default is the default drive current
