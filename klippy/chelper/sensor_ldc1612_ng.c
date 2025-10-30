@@ -65,6 +65,7 @@ enum {
 #define PRODUCT_BTT_EDDY 1
 #define PRODUCT_CARTOGRAPHER 2
 #define PRODUCT_MELLOW_FLY 3
+#define PRODUCT_LDC1612_INTERNAL_CLK 4
 
 // Chip registers
 #define REG_DATA0_MSB 0x00
@@ -348,6 +349,9 @@ config_ldc1612_ng(uint32_t oid, uint32_t i2c_oid, uint8_t product, int32_t intb_
         // pull that out on the python side.
         break;
 #endif
+    case PRODUCT_LDC1612_INTERNAL_CLK:
+        ld->sensor_cvt = 43400000.0f / (float)(1<<28);
+        break;
     default:
         shutdown("ldc1612_ng: unknown product");
     }
@@ -723,11 +727,11 @@ check_safe_start(struct ldc1612_ng* ld, uint32_t data, uint32_t time)
 
     // And we need to do it _after_ this time, to make sure we didn't
     // start below the threshold
-    if (lh->safe_start_time != 0 && timer_is_before(time, lh->safe_start_time)) {
-        dprint("ZZZ EARLY! time=%u < %u", time, lh->safe_start_time);
-        notify_trigger(ld, 0, ld->other_reason_base + REASON_ERROR_TOO_EARLY);
-        return false;
-    }
+    // if (lh->safe_start_time != 0) {
+    //     dprint("ZZZ EARLY! time=%u < %u", time, lh->safe_start_time);
+    //     notify_trigger(ld, 0, ld->other_reason_base + REASON_ERROR_TOO_EARLY);
+    //     return false;
+    // }
 
     if (is_tap && lh->homing_trigger_freq != 0) {
         // If we're tapping, then make the homing trigger freq a second thershold.
