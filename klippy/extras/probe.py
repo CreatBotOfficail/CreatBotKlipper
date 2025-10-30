@@ -40,18 +40,23 @@ class ProbeCommandHelper:
         self.printer = config.get_printer()
         self.probe = probe
         self.query_endstop = query_endstop
+        self.last_state = False
+        self.z_offset = self.avg_value = 0.
+        self.last_z_result = 0.
+        self.probe_calibrate_z = 0.
         self.name = config.get_name()
-        gcode = self.printer.lookup_object('gcode')
+        self.register_commands()
+
+    def register_commands(self):
         # QUERY_PROBE command
         self.last_state = False
+        gcode = self.printer.lookup_object('gcode')
         gcode.register_command('QUERY_PROBE', self.cmd_QUERY_PROBE,
                                desc=self.cmd_QUERY_PROBE_help)
         # PROBE command
-        self.last_z_result = 0.
         gcode.register_command('PROBE', self.cmd_PROBE,
                                desc=self.cmd_PROBE_help)
         # PROBE_CALIBRATE command
-        self.probe_calibrate_z = 0.
         gcode.register_command('PROBE_CALIBRATE', self.cmd_PROBE_CALIBRATE,
                                desc=self.cmd_PROBE_CALIBRATE_help)
         # Other commands
@@ -65,6 +70,8 @@ class ProbeCommandHelper:
     def get_status(self, eventtime):
         return {'name': self.name,
                 'last_query': self.last_state,
+                'z_offset': self.z_offset,
+                'accuracy_avg': self.avg_value,
                 'last_z_result': self.last_z_result}
     cmd_QUERY_PROBE_help = "Return the status of the z-probe"
     def cmd_QUERY_PROBE(self, gcmd):
@@ -84,6 +91,7 @@ class ProbeCommandHelper:
         if kin_pos is None:
             return
         z_offset = self.probe_calibrate_z - kin_pos[2]
+        self.z_offset = z_offset
         gcode = self.printer.lookup_object('gcode')
         gcode.respond_info(
             "%s: z_offset: %.3f\n"
@@ -145,6 +153,7 @@ class ProbeCommandHelper:
         range_value = max_value - min_value
         avg_value = calc_probe_z_average(positions, 'average')[2]
         median = calc_probe_z_average(positions, 'median')[2]
+        self.avg_value = avg_value
         # calculate the standard deviation
         deviation_sum = 0
         for i in range(len(positions)):
@@ -169,8 +178,9 @@ class ProbeCommandHelper:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer."
             % (self.name, new_calibrate))
-        configfile = self.printer.lookup_object('configfile')
-        configfile.set(self.name, 'z_offset', "%.3f" % (new_calibrate,))
+        if self.name == "probe":
+            configfile = self.printer.lookup_object('configfile')
+            configfile.set(self.name, 'z_offset', "%.3f" % (new_calibrate,))
 
 # Homing via probe:z_virtual_endstop
 class HomingViaProbeHelper:
@@ -178,8 +188,9 @@ class HomingViaProbeHelper:
         self.printer = config.get_printer()
         self.mcu_probe = mcu_probe
         self.multi_probe_pending = False
+        self.probe_name = config.get_name()
         # Register z_virtual_endstop pin
-        self.printer.lookup_object('pins').register_chip('probe', self)
+        self.printer.lookup_object('pins').register_chip(self.probe_name, self)
         # Register event handlers
         self.printer.register_event_handler('klippy:mcu_identify',
                                             self._handle_mcu_identify)
@@ -384,6 +395,7 @@ class ProbePointsHelper:
         self.finalize_callback = finalize_callback
         self.probe_points = default_points
         self.name = config.get_name()
+        self.probe_name = config.get('probe', self.name)
         self.gcode = self.printer.lookup_object('gcode')
         # Read config settings
         if default_points is None or config.get('points', None) is not None:
@@ -433,7 +445,7 @@ class ProbePointsHelper:
     def start_probe(self, gcmd):
         manual_probe.verify_no_manual_probe(self.printer)
         # Lookup objects
-        probe = self.printer.lookup_object('probe', None)
+        probe = self.printer.lookup_object(self.probe_name, None)
         method = gcmd.get('METHOD', 'automatic').lower()
         def_move_z = self.default_horizontal_move_z
         self.horizontal_move_z = gcmd.get_float('HORIZONTAL_MOVE_Z',

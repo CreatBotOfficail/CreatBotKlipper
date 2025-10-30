@@ -17,6 +17,7 @@ class SaveVariables:
             self.loadVariables()
         except self.printer.command_error as e:
             raise config.error(str(e))
+        self.printer.add_object('save_variables', self)
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command('SAVE_VARIABLE', self.cmd_SAVE_VARIABLE, True,
                                desc=self.cmd_SAVE_VARIABLE_help)
