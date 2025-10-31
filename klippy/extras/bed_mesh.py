@@ -289,7 +289,7 @@ class BedMesh:
             gcmd.respond_info("No mesh loaded to offset")
     def _handle_dump_request(self, web_request):
         eventtime = self.printer.get_reactor().monotonic()
-        prb = self.printer.lookup_object("probe", None)
+        prb = self.pmgr.get_current_probe()
         th_sts = self.printer.lookup_object("toolhead").get_status(eventtime)
         result = {"current_mesh": {}, "profiles": self.pmgr.get_profiles()}
         if self.z_mesh is not None:
@@ -862,13 +862,21 @@ class ProbeManager:
                                j+1, repr([prev_c1, prev_c3])))
             self.faulty_regions.append((c1, c3))
 
+    def get_current_probe(self):
+        pprobe = self.printer.lookup_object("eddy_probe")
+        if pprobe is None:
+            pprobe = self.printer.lookup_object("probe")
+        probe_name = pprobe.get_status(None).get("name", "")
+        logging.info(f"bed mesh: using probe '{probe_name}'")
+        return pprobe
+
     def start_probe(self, gcmd):
         method = gcmd.get("METHOD", "automatic").lower()
         can_scan = False
-        pprobe = self.printer.lookup_object("probe", None)
+        pprobe = self.get_current_probe()
         if pprobe is not None:
             probe_name = pprobe.get_status(None).get("name", "")
-            can_scan = probe_name.startswith("probe_eddy_current")
+            can_scan = "eddy" in probe_name
         if method == "rapid_scan" and can_scan:
             self.rapid_scan_helper.perform_rapid_scan(gcmd)
         else:
@@ -1188,7 +1196,7 @@ class RapidScanHelper:
         gcmd.respond_info(
             "Beginning rapid surface scan at height %.2f..." % (scan_height)
         )
-        pprobe = self.printer.lookup_object("probe")
+        pprobe = self.probe_manager.get_current_probe()
         toolhead = self.printer.lookup_object("toolhead")
         # Calculate time window around which a sample is valid.  Current
         # assumption is anything within 2mm is usable, so:
@@ -1226,7 +1234,7 @@ class RapidScanHelper:
     def _raise_tool(self, gcmd, scan_height):
         # If the nozzle is below scan height raise the tool
         toolhead = self.printer.lookup_object("toolhead")
-        pprobe = self.printer.lookup_object("probe")
+        pprobe = self.probe_manager.get_current_probe()
         cur_pos = toolhead.get_position()
         if cur_pos[2] >= scan_height:
             return
@@ -1238,7 +1246,7 @@ class RapidScanHelper:
     def _move_to_scan_height(self, gcmd, scan_height):
         time_window = gcmd.get_float("SAMPLE_TIME")
         toolhead = self.printer.lookup_object("toolhead")
-        pprobe = self.printer.lookup_object("probe")
+        pprobe = self.probe_manager.get_current_probe()
         cur_pos = toolhead.get_position()
         pparams = pprobe.get_probe_params(gcmd)
         lift_speed = pparams["lift_speed"]
