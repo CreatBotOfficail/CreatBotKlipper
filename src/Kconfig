@@ -104,6 +104,14 @@ config WANT_ADXL345
     bool
     depends on HAVE_GPIO_SPI
     default y
+config WANT_SPI
+    bool
+    depends on HAVE_GPIO_SPI
+    default y
+config WANT_I2C
+    bool
+    depends on HAVE_GPIO_I2C
+    default y
 config WANT_LIS2DW
     bool
     depends on HAVE_GPIO_SPI || HAVE_GPIO_I2C
