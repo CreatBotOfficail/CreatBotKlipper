@@ -87,7 +87,7 @@ class DualProbeCalibrator:
             return
         self.x_offset = self.base_x_offset - save_variables["nozzle_x_offset_val"]
         self.y_offset = save_variables["nozzle_y_offset_val"]
-        self.z_calibrate_compensation = save_variables.get("z_calibrate_compensation", 0.)
+        self.z_calibrate_compensation = save_variables.get("nozzle_z_offset_compensation", 0.)
 
     def _start_next_step(self):
         if self._waiting:
@@ -106,7 +106,7 @@ class DualProbeCalibrator:
             self.gcmd.respond_info("Obtaining right nozzle probe average value...")
             self._run_automatic_gcode(
                 "T1\n"
-                f"_CLIENT_LINEAR_MOVE X=-{self.x_offset} Y=-{self.y_offset} F=6000\n"
+                f"_CLIENT_LINEAR_MOVE X={-self.x_offset} Y={-self.y_offset} F=6000\n"
                 "G4 P1000\n"
                 "PROBE_ACCURACY_NOZZLE",
                 self._on_right_accuracy_done
@@ -151,6 +151,7 @@ class DualProbeCalibrator:
         self.gcmd.respond_info(f"Right nozzle probe average: {right_avg:.6f}")
 
     def _calculate_final_offset(self):
+        output = ""
         try:
             left_avg = self.data['left_probe_avg']
             right_avg = self.data['right_probe_avg']
@@ -160,15 +161,19 @@ class DualProbeCalibrator:
                 f"Right nozzle probe average: {right_avg:.6f}\n"
                 f"Final dual-nozzle offset:   {final_offset:.6f}\n"
             )
-            self.gcmd.respond_info(output)
             if not (-self.max_z_offset <= final_offset <= self.max_z_offset):
-                raise ValueError(f"Final offset {final_offset:.3f} is out of valid range [-{self.max_z_offset}, {self.max_z_offset}]")
-            self.gcode.run_script_from_command(f"SAVE_VARIABLE VARIABLE=nozzle_z_offset_val VALUE={final_offset:.3f}")
-        except ValueError as ve:
-            self.gcmd.respond_info(f"Calibration result abnormal: {str(ve)}. Please check and recalibrate.")
+                error_msg = (
+                    f"Final offset {final_offset:.3f} is out of range "
+                    f"[-{self.max_z_offset}, {self.max_z_offset}]. "
+                    "Please check and recalibrate.\n"
+                )
+                output += error_msg
+
         except Exception as e:
-            self.gcmd.respond_info(f"Dual-Nozzle Offset Calculation Error: {str(e)}")
+            output = f"Dual-Nozzle Offset Calculation Error: {str(e)}\n"
+
         finally:
+            self.gcmd.respond_info(output)
             self._reset_state()
 
     def _reset_state(self):
