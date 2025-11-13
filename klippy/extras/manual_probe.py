@@ -149,6 +149,7 @@ class ManualProbeHelper:
         self.gcode.respond_info(
             "Starting manual Z probe. Use TESTZ to adjust position.\n"
             "Finish with ACCEPT or ABORT command.")
+        self.printer.send_event('manual_probe:start')
         self.start_position = self.toolhead.get_position()
         self.report_z_status()
     def get_kinematics_pos(self):
@@ -257,6 +258,7 @@ class ManualProbeHelper:
         if success:
             kin_pos = self.get_kinematics_pos()
         self.finalize_callback(kin_pos)
+        self.printer.send_event('manual_probe:finished', success)
 
 def load_config(config):
     return ManualProbe(config)
