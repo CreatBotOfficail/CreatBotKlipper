@@ -95,6 +95,68 @@ class AirPump_Helper(filament_switch_sensor.RunoutHelper):
             super()._runout_event_handler(eventtime)
             self.retry_count = 0
 
+class AirCleanController:
+    def __init__(self, config, printer):
+        self.printer = printer
+        self.reactor = printer.get_reactor()
+
+        ppins = printer.lookup_object('pins')
+        air_clean_pin = config.get('air_clean_pin')
+        self.air_clean_pin = ppins.setup_pin('digital_out', air_clean_pin)
+        self.air_clean_pin.setup_max_duration(0.)
+        self.air_clean_pin.setup_start_value(0., 0.)
+        self.airclean_mcu = self.air_clean_pin.get_mcu()
+
+        self.run_interval = config.getfloat('run_interval', 300., minval=60.)
+        self.run_time = config.getfloat('run_time', 2., minval=1.)
+        self.is_ready = False
+        self.timer = None
+        self.airpump_active = False
+        self.next_activation_time = 0.0
+        printer.register_event_handler("klippy:ready", self._handle_ready)
+
+    def _handle_ready(self):
+        self.is_ready = True
+        self.timer = self.reactor.register_timer(self._update_callback, self.reactor.NOW)
+
+    def _update_callback(self, eventtime):
+        if not self.is_ready:
+            return eventtime + 1.0
+        print_stats = self.printer.lookup_object('print_stats')
+        status = print_stats.get_status(eventtime)
+        current_state = status.get('state', 'standby')
+        if current_state == 'printing':
+            if eventtime >= self.next_activation_time and not self.airpump_active:
+                self._set_airpump_state(eventtime, True)
+        else:
+            self.next_activation_time = eventtime + self.run_interval
+            if self.airpump_active:
+                self._set_airpump_state(eventtime, False)
+
+        return eventtime + 0.5
+
+    def _set_airpump_state(self, eventtime, state):
+        print_time = self.airclean_mcu.estimated_print_time(eventtime + 0.1)
+        if state:
+            if not self.airpump_active:
+                self.air_clean_pin.set_digital(print_time, 1.0)
+                self.airpump_active = True
+                logging.info("Air pump activated at printing state")
+                self.reactor.register_timer(
+                    self._auto_stop_pump,
+                    eventtime + self.run_time
+                )
+        else:
+            if self.airpump_active:
+                self.air_clean_pin.set_digital(print_time, 0.0)
+                self.airpump_active = False
+                logging.info("Air pump deactivated")
+
+    def _auto_stop_pump(self, eventtime):
+        self._set_airpump_state(eventtime, False)
+        self.next_activation_time = eventtime + self.run_interval
+        return self.reactor.NEVER
+
 class AirPumpLoad:
     def __init__(self, config):
         self.cmd_SET_AIRPUMP_help = "Sets the state of the filament airpump"
@@ -113,6 +175,7 @@ class AirPumpLoad:
                                    self.name,
                                    self.cmd_SET_AIRPUMP,
                                    desc=self.cmd_SET_AIRPUMP_help)
+        self.air_clean_controller = AirCleanController(config, self.printer)
 
     def _pump_status_handler(self, eventtime, state):
         self.airpump_helper.note_filament_present(eventtime, state)

@@ -14,11 +14,11 @@ class LEDStateHandler:
                 self.color_map[state] = (r, g, b)
 
         default_colors = {
-            'idle': (0.0, 0.0, 0.0),
-            'printing': (0.0, 1.0, 0.0),
-            'paused': (1.0, 1.0, 0.0),
-            'error': (1.0, 0.0, 0.0),
-            'heating': (1.0, 0.5, 0.0),
+            'idle': (0.3, 0.3, 0.3),
+            'printing': (0.0, 0.0, 0.3),
+            'paused': (0.3, 0.0, 0.0),
+            'error': (0.3, 0.0, 0.0),
+            'heating': (0.0, 0.0, 0.3),
         }
         for state, color in default_colors.items():
             if state not in self.color_map:
@@ -78,7 +78,12 @@ class LEDStateHandler:
         elif current_state == 'paused':
             color_name = 'paused'
         elif current_state == 'cancelled':
-            color_name = 'paused' if message else 'idle'
+            if message:
+                color_name = 'paused'
+            elif max_hot_target > 0:
+                color_name = 'heating'
+            else:
+                color_name = 'idle'
         elif current_state == 'error':
             color_name = 'error'
         else:
@@ -93,24 +98,14 @@ class LEDStateHandler:
         if self.last_color != (r, g, b):
             try:
                 color = (r, g, b, 0.0)
-                toolhead = self.printer.lookup_object('toolhead')
-                toolhead.register_lookahead_callback(
-                    lambda pt: self._update_led_color(color, pt)
-                )
+                self.led.led_helper._set_color(None, color)
+                self.led.led_helper._check_transmit(print_time=None)
                 logging.info('LED %s: %s %s', self.led_name, current_state, (r, g, b))
                 self.last_color = (r, g, b)
             except Exception as e:
                 logging.error("Error updating LED color: %s", str(e))
 
         return eventtime + 0.5
-
-    def _update_led_color(self, color, print_time):
-        try:
-            if self.led.led_helper.led_state[0] != color:
-                self.led.led_helper._set_color(None, color)
-                self.led.led_helper._check_transmit(print_time)
-        except Exception as e:
-            logging.error("Error in LED transmission: %s", str(e))
 
 def load_config_prefix(config):
     return LEDStateHandler(config)

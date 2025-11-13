@@ -10,4 +10,5 @@ Jinja2==2.11.3
 python-can==3.3.4
 markupsafe==1.1.1
 numpy==2.0.2
+scipy==1.13.1
 setuptools==75.6.0 ; python_version >= '3.12' # Needed by python-can

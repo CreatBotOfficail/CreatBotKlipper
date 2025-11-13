@@ -71,7 +71,7 @@ line="$run_line"
 z_height=$(awk -v target_line="$line" '
   BEGIN { found = 0 }
   NR <= target_line {
-    if ($0 ~ /^[[:space:]]*G[01][[:space:]]+.*[zZ][[:space:]]*[-+]?[0-9]/) {
+    if ($0 ~ /^[[:space:]]*G[01][[:space:]].*[zZ]/) {
       if (match($0, /[zZ][[:space:]]*[-+]?[0-9]*\.?[0-9]+/)) {
         z_str = substr($0, RSTART, RLENGTH)
         if (match(z_str, /[-+]?[0-9]*\.?[0-9]+/)) {
