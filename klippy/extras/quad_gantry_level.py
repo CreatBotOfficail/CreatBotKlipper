@@ -50,7 +50,7 @@ class QuadGantryLevel:
     def cmd_QUAD_GANTRY_LEVEL(self, gcmd):
         self.z_status.reset()
         self.retry_helper.start(gcmd)
-        self.probe_helper.start_probe(gcmd)
+        self.probe_helper.start_probe(gcmd, probe_method="probe")
     def probe_finalize(self, offsets, positions):
         # Mirror our perspective so the adjustments make sense
         # from the perspective of the gantry
