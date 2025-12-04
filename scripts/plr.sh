@@ -1,7 +1,7 @@
 #!/bin/bash
-PLR_DIR="/home/klipper/printer_data/gcodes/.plr"
-CONFIG_FILE="/home/klipper/printer_data/config/config_variables.cfg"
-LOG_FILE="/home/klipper/printer_data/logs/moonraker.log"
+PLR_DIR="/opt/printer_data/gcodes/.plr"
+CONFIG_FILE="/opt/printer_data/config/config_variables.cfg"
+LOG_FILE="/opt/printer_data/logs/moonraker.log"
 echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> [$(date '+%F %T')] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" >> "$LOG_FILE"
 
 z_offset="$1"
@@ -12,8 +12,8 @@ mkdir -p "$PLR_DIR" || {
 }
 
 filepath=$(sed -n "s/.*filepath *= *'\([^']*\)'.*/\1/p" "$CONFIG_FILE")
-cp "${filepath}" "/home/klipper/plrtmpA.$$"
-sourcefile="/home/klipper/plrtmpA.$$"
+cp "${filepath}" "/opt/plrtmpA.$$"
+sourcefile="/opt/plrtmpA.$$"
 
 raw_value=$(sed -n -E "s/^[[:space:]]*power_loss_paused[[:space:]]*=[[:space:]]*(True|False)[[:space:]]*(;.*)?$/\1/p" "$CONFIG_FILE" | tail -n1)
 is_pause=False
@@ -230,5 +230,5 @@ echo "G1 Z${z_height} F3000" >> "${PLR_DIR}/${plr}"
 sed -n "${line},$ p" "${sourcefile}" >> "${PLR_DIR}/${plr}"
 echo "Append the file from ${line} line to ${PLR_DIR}/${plr}" >> "$LOG_FILE"
 
-rm /home/klipper/plrtmpA.$$
+rm /opt/plrtmpA.$$
 echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> [$(date '+%F %T')] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" >> "$LOG_FILE"

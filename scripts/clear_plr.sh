@@ -1,3 +1,3 @@
-if [ -d ~/printer_data/gcodes/.plr ]; then
-    rm -rf ~/printer_data/gcodes/.plr
+if [ -d /opt/printer_data/gcodes/.plr ]; then
+    rm -rf /opt/printer_data/gcodes/.plr
 fi
