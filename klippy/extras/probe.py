@@ -442,12 +442,15 @@ class ProbePointsHelper:
             nextpos[0] -= self.probe_offsets[0]
             nextpos[1] -= self.probe_offsets[1]
         self._move(nextpos, self.speed)
-    def start_probe(self, gcmd):
+    def start_probe(self, gcmd, probe_method=None):
         manual_probe.verify_no_manual_probe(self.printer)
         # Lookup objects
-        probe = self.printer.lookup_object("eddy_probe")
-        if probe is None:
-            probe = self.printer.lookup_object("probe")
+        if probe_method is None:
+            probe = self.printer.lookup_object("eddy_probe", None)
+            if probe is None:
+                probe = self.printer.lookup_object("probe")
+        else:
+            probe = self.printer.lookup_object(probe_method)
         method = gcmd.get('METHOD', 'automatic').lower()
         def_move_z = self.default_horizontal_move_z
         self.horizontal_move_z = gcmd.get_float('HORIZONTAL_MOVE_Z',
