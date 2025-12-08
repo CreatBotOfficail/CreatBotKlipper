@@ -230,6 +230,55 @@ class ConfigFileReader:
         fileconfig = self._create_fileconfig()
         self._parse_config(data, filename, fileconfig, set())
         return fileconfig
+    def read_versioned_printer_config(self, printer_config_base, printer_config_dir, printer_version):
+        """
+        Read printer config files from versioned directories.
+        Higher versions override lower versions for the same filename.
+        """
+        machine_config_data = ""
+        printer_config_dir = os.path.join(printer_config_base, printer_config_dir)
+
+        try:
+            major, minor = map(int, printer_version.split('.'))
+        except ValueError:
+            # If version format is invalid, fall back to original behavior
+            machine_config_path = os.path.join(printer_config_dir, printer_version)
+            if os.path.isdir(machine_config_path):
+                for file in sorted(os.listdir(machine_config_path)):
+                    if file.endswith('.cfg'):
+                        file_path = os.path.join(machine_config_path, file)
+                        machine_config_data += self.read_config_file(file_path) + '\n'
+            return machine_config_data
+        
+        # Collect all valid version directories
+        version_dirs = {}
+        if os.path.isdir(printer_config_dir):
+            for dirname in os.listdir(printer_config_dir):
+                try:
+                    v_major, v_minor = map(int, dirname.split('.'))
+                    version_dirs[(v_major, v_minor)] = dirname
+                except ValueError:
+                    continue
+        
+        # Sort versions in ascending order (so higher versions override lower ones later)
+        sorted_versions = sorted(version_dirs.keys())
+        
+        # Collect all config files, higher versions override lower ones
+        config_files = {}
+        for v_tuple in sorted_versions:
+            # Only include versions up to and including the requested version
+            if v_tuple > (major, minor):
+                continue
+            v_dir = version_dirs[v_tuple]
+            v_path = os.path.join(printer_config_dir, v_dir)
+            for file in os.listdir(v_path):
+                if file.endswith('.cfg'):
+                    file_path = os.path.join(v_path, file)
+                    config_files[file] = self.read_config_file(file_path)
+        # Combine all config files in sorted order
+        for file in sorted(config_files.keys()):
+            machine_config_data += config_files[file] + '\n'
+        return machine_config_data
 
 
 ######################################################################
@@ -299,12 +348,23 @@ class ConfigAutoSave:
                 lines[lineno] = '#' + lines[lineno]
         return "\n".join(lines)
     def load_main_config(self):
-        filename = self.printer.get_start_args()['config_file']
+        start_args = self.printer.get_start_args()
+        filename = start_args['config_file']
+        printer_config_dir = start_args.get('printer_config_dir')
+        
         cfgrdr = ConfigFileReader()
+
+        machine_config_data = ""
+        if printer_config_dir:
+            printer_config_base = start_args.get('printer_config_base', '/opt/klipper/config')
+            printer_version = start_args.get('printer_version', '1.0')
+            machine_config_data = cfgrdr.read_versioned_printer_config(printer_config_base, printer_config_dir, printer_version)
+
         data = cfgrdr.read_config_file(filename)
         regular_data, autosave_data = self._find_autosave_data(data)
+        combined_data = machine_config_data + regular_data
         regular_fileconfig = cfgrdr.build_fileconfig_with_includes(
-            regular_data, filename)
+            combined_data, filename)
         autosave_data = self._strip_duplicates(autosave_data,
                                                regular_fileconfig)
         self.fileconfig = cfgrdr.build_fileconfig(autosave_data, filename)

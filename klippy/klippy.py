@@ -58,12 +58,12 @@ class Printer:
         if self.state_message in (message_ready, message_startup):
             self.state_message = msg
         if (msg != message_ready
-            and self.start_args.get('debuginput') is not None):
+                and self.start_args.get('debuginput') is not None):
             self.request_exit('error_exit')
     def update_error_msg(self, oldmsg, newmsg):
         if (self.state_message != oldmsg
             or self.state_message in (message_ready, message_startup)
-            or newmsg in (message_ready, message_startup)):
+                or newmsg in (message_ready, message_startup)):
             return
         self.state_message = newmsg
         logging.error(newmsg)
@@ -213,8 +213,8 @@ class Printer:
         return self._get_print_state() == "complete"
     def is_paused(self):
         return self._get_print_state() == "paused"
-    def handle_internal_error(self, msg: str, gcode, should_pause: bool = False, 
-                            should_stop_heaters: bool = False, heater=None):
+    def handle_internal_error(self, msg: str, gcode, should_pause: bool = False,
+                              should_stop_heaters: bool = False, heater=None):
         gcode._respond_error(f"INTERNAL_ERROR: {msg}")
         if should_pause:
             logging.info("Attempting to pause print")
@@ -314,15 +314,24 @@ def main():
     opts.add_option("-d", "--dictionary", dest="dictionary", type="string",
                     action="callback", callback=arg_dictionary,
                     help="file to read for mcu protocol dictionary")
+    opts.add_option("-M", "--printer-config-base", dest="printer_config_base",
+                    default="/opt/klipper/config",
+                    help="base directory for printer configuration files (default: /opt/klipper/config)")
+    opts.add_option("-D", "--printer-config-dir", dest="printer_config_dir",
+                    help="printer configuration directory name under printer config base directory")
+    opts.add_option("-V", "--printer-version", dest="printer_version",
+                    help="printer configuration version (e.g., 1.0, 1.1)")
     opts.add_option("--import-test", action="store_true",
                     help="perform an import module test")
     options, args = opts.parse_args()
     if options.import_test:
         import_test()
-    if len(args) != 1:
-        opts.error("Incorrect number of arguments")
-    start_args = {'config_file': args[0], 'apiserver': options.apiserver,
-                  'start_reason': 'startup'}
+    if not args:
+        opts.error("Incorrect number of arguments: no config file specified")
+    config_file = args[0]
+    start_args = {'config_file': config_file, 'apiserver': options.apiserver,
+                  'start_reason': 'startup', 'printer_config_dir': options.printer_config_dir,
+                  'printer_version': options.printer_version, 'printer_config_base': options.printer_config_base}
 
     debuglevel = logging.INFO
     if options.verbose:
