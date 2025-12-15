@@ -32,13 +32,13 @@ class LEDStateHandler:
         self.reactor = self.printer.get_reactor()
         self.timer = None
 
-        self.print_stats = self.printer.lookup_object('print_stats')
-        self.heaters = self.printer.lookup_object('heaters')
+        self.print_stats = None
+        self.heaters = None
         self.printer.register_event_handler('klippy:ready', self._handle_ready)
 
     def _handle_ready(self):
+        self.print_stats = self.printer.lookup_object('print_stats')
         self.heaters = self.printer.lookup_object('heaters')
-        self.display_status = self.printer.lookup_object('display_status', None)
 
         for heater_name in self.heaters.get_all_heaters():
             self.hot_targets[heater_name] = 0.0

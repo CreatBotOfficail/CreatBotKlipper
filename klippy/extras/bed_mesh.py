@@ -863,7 +863,7 @@ class ProbeManager:
             self.faulty_regions.append((c1, c3))
 
     def get_current_probe(self):
-        pprobe = self.printer.lookup_object("eddy_probe")
+        pprobe = self.printer.lookup_object("eddy_probe", None)
         if pprobe is None:
             pprobe = self.printer.lookup_object("probe")
         probe_name = pprobe.get_status(None).get("name", "")
