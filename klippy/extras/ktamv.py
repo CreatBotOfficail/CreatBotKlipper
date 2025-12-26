@@ -6,7 +6,7 @@ import json
 import shutil
 import os
 
-SAVE_ROOT_DIR = "/home/klipper/kTAMV/nozzle_detection_results"
+SAVE_ROOT_DIR = "/opt/kTAMV/nozzle_detection_results"
 class ktamv:
     __FRAME_WIDTH = 640
     __FRAME_HEIGHT = 480
