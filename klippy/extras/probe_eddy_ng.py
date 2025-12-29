@@ -588,7 +588,7 @@ class ProbeEddy:
 
     def _log_debug(self, msg):
         if self.params.debug:
-            logging.info(f"{self._name}: {msg}")
+            logging.debug(f"{self._name}: {msg}")
 
     def define_commands(self, gcode):
         gcode.register_command("PROBE_EDDY_NG_STATUS", self.cmd_STATUS, self.cmd_STATUS_help)
@@ -1224,18 +1224,11 @@ class ProbeEddy:
 
             if state == FINDING_HOMING and ok_for_homing:
                 self._dc_to_fmap[drive_current] = mapping
-                self._reg_drive_current = drive_current
-                self._log_msg(f"using {drive_current} for homing.")
-                state = FINDING_TAP
-
-            if state == FINDING_TAP and ok_for_tap:
-                self._dc_to_fmap[drive_current] = mapping
-                self._tap_drive_current = drive_current
-                self._log_msg(f"using {drive_current} for tap.")
+                self._reg_drive_current = self._tap_drive_current = drive_current
                 state = DONE
 
             if state == DONE:
-                result_msg = "Setup success. Please check whether homing works with G28 Z, then check if tap works with PROBE_EDDY_NG_TAP."
+                result_msg = "Setup success. Please check whether homing works with G28 Z"
                 break
 
             if drive_current - start_drive_current >= max_dc_increase:
@@ -1258,9 +1251,14 @@ class ProbeEddy:
 
         if state > FINDING_HOMING:
             self.reset_drive_current()
-            self.save_config()
 
-        self._z_not_homed()
+            eventtime = self._reactor.monotonic()
+            print_stats = self._printer.lookup_object('print_stats')
+            status = print_stats.get_status(eventtime)
+            state = status.get('state', 'standby')
+            if state not in ("printing", "paused"):
+                self.save_config()
+                self._z_not_homed()
 
     cmd_CALIBRATE_help = (
         "Calibrate the eddy current sensor. Specify DRIVE_CURRENT to calibrate for a different drive current "
@@ -2248,7 +2246,17 @@ class ProbeEddyScanningProbe:
         if not self.eddy._z_homed():
             raise self._printer.command_error("Z axis must be homed before probing")
 
-        self.eddy.probe_to_start_position()
+        th_pos = self._toolhead.get_position()
+        current_z = th_pos[2]
+
+        probe_result = self.eddy.probe_static_height()
+        if not probe_result.valid:
+            raise self._printer.command_error("Failed to get valid probe height reading")
+
+        probe_height = probe_result.value
+        self._tap_offset = current_z - probe_height
+        logging.info(f"current z:{current_z}, probe height:{probe_height}, offset:{self._tap_offset}")
+        self.eddy.probe_to_start_position(current_z)
         self._sampler = self.eddy.start_sampler()
 
     def end_probe_session(self):

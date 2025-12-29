@@ -109,7 +109,7 @@ class LDC1612_ng:
             self._ldc_settle_time = 0.005
             self._ldc_fin_divider = 1
             self._ldc_fref_divider = 1
-            self._default_drive_current = 15
+            self._default_drive_current = 18
 
         self._ldc_freq_ref = round(self._ldc_freq_clk / self._ldc_fref_divider)
 
