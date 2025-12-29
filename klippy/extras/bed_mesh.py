@@ -1236,12 +1236,19 @@ class RapidScanHelper:
         toolhead = self.printer.lookup_object("toolhead")
         pprobe = self.probe_manager.get_current_probe()
         cur_pos = toolhead.get_position()
-        if cur_pos[2] >= scan_height:
-            return
         pparams = pprobe.get_probe_params(gcmd)
         lift_speed = pparams["lift_speed"]
-        cur_pos[2] = self.scan_height + .5
+
+        safe_z_home = self.printer.lookup_object("safe_z_home", None)
+        if safe_z_home is None:
+            pass
+        else:
+            cur_pos[0] = safe_z_home.home_x_pos
+            cur_pos[1] = safe_z_home.home_y_pos
+
+        cur_pos[2] = self.scan_height
         toolhead.manual_move(cur_pos, lift_speed)
+        toolhead.wait_moves()
 
     def _move_to_scan_height(self, gcmd, scan_height):
         time_window = gcmd.get_float("SAMPLE_TIME")
