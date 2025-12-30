@@ -21,7 +21,7 @@ class Door:
         door_pin = config.get('pin')
         buttons = self.printer.load_object(config, 'buttons')
         buttons.register_debounce_button(door_pin, self._door_status_handler, config)
-        self.save_variables = self.printer.lookup_object('save_variables')
+        self.printer.register_event_handler("klippy:ready", self.handle_ready)
         self.locked = False
 
         if not hasattr(self.printer, '_door_commands_registered'):
@@ -40,11 +40,11 @@ class Door:
             self.printer._door_webhook_registered = True
 
         if not hasattr(self.printer, '_door_start_print_wrapped'):
-            gcode = self.printer.lookup_object('gcode')
-            self.prev_START_PRINT = gcode.register_command("START_PRINT", None)
-            gcode.register_command("START_PRINT", self.cmd_START_PRINT)
             self.printer._door_start_print_wrapped = True
         logging.info(f"Door '{self.name}' initialized")
+
+    def handle_ready(self):
+        self.save_variables = self.printer.lookup_object('save_variables')
 
     def _door_status_handler(self, eventtime, state):
         if state:
