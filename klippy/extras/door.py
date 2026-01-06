@@ -8,22 +8,26 @@ import logging
 class Door:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
         self.name = config.get_name().split()[-1]
         ppins = self.printer.lookup_object('pins')
         self.lock_pin = None
         self.lock_mcu = None
         lock_pin = config.get('lock_pin', None)
-        self.delay_time = config.getfloat('delay_time', 1.0)
+        self.delay_time = config.getfloat('delay_time', 2.0)
+        self.timeout_time = config.getfloat('timeout_time', 20.0)
         if lock_pin is not None:
             self.lock_pin = ppins.setup_pin('digital_out', lock_pin)
-            self.lock_pin.setup_max_duration(0.)
+            self.lock_pin.setup_max_duration(0.) 
             self.lock_mcu = self.lock_pin.get_mcu()
         door_pin = config.get('pin')
         buttons = self.printer.load_object(config, 'buttons')
         buttons.register_debounce_button(door_pin, self._door_status_handler, config)
         self.save_variables = self.printer.lookup_object('save_variables')
         self.locked = False
-
+        self.door_state = True
+        self.lock_timer = None
+        self.unlock_timeout_timer = None
         if not hasattr(self.printer, '_door_commands_registered'):
             gcode = self.printer.lookup_object('gcode')
             gcode.register_command("SET_DOOR_FUNCTION", self.cmd_SET_DOOR_FUNCTION)
@@ -39,19 +43,25 @@ class Door:
             wh.register_endpoint("door/set_lock", self._handle_set_lock_webhook)
             self.printer._door_webhook_registered = True
 
-        if not hasattr(self.printer, '_door_start_print_wrapped'):
-            gcode = self.printer.lookup_object('gcode')
-            self.prev_START_PRINT = gcode.register_command("START_PRINT", None)
-            gcode.register_command("START_PRINT", self.cmd_START_PRINT)
-            self.printer._door_start_print_wrapped = True
-        logging.info(f"Door '{self.name}' initialized")
-
     def _door_status_handler(self, eventtime, state):
+        self.door_state = not state
         if state:
-            self._set_lock_state(True, eventtime + self.delay_time)
-        else:
-            self._set_lock_state(False, eventtime)
             self._handle_door_open(eventtime)
+            if self.unlock_timeout_timer is not None:
+                self.reactor.unregister_timer(self.unlock_timeout_timer)
+                self.unlock_timeout_timer = None
+        else:
+            if self.lock_timer is not None:
+                self.reactor.unregister_timer(self.lock_timer)
+                self.lock_timer = None
+            self.lock_timer = self.reactor.register_timer(
+                self._delay_lock_callback, eventtime + self.delay_time)
+    
+    def _delay_lock_callback(self, eventtime):
+        self._set_lock_state(True, eventtime)
+        self.lock_timer = None
+        logging.info(f"Door {self.name} closed")
+        return self.reactor.NEVER
 
     def _set_lock_state(self, locked, eventtime):
         self.locked = locked
@@ -60,7 +70,23 @@ class Door:
         print_time = self.lock_mcu.estimated_print_time(eventtime + 0.1)
         value = 1 if locked else 0
         self.lock_pin.set_digital(print_time, value)
-        logging.info(f"Door '{self.name}' {'locked' if locked else 'unlocked'}")
+        logging.info(f"Door {self.name} {'locked' if locked else 'unlocked'}")
+        
+        if not locked:
+            if self.unlock_timeout_timer is not None:
+                self.reactor.unregister_timer(self.unlock_timeout_timer)
+            self.unlock_timeout_timer = self.reactor.register_timer(
+                self._unlock_timeout_callback, eventtime + self.timeout_time)
+        else:
+            if self.unlock_timeout_timer is not None:
+                self.reactor.unregister_timer(self.unlock_timeout_timer)
+                self.unlock_timeout_timer = None
+    
+    def _unlock_timeout_callback(self, eventtime):
+        self._set_lock_state(True, eventtime)
+        self.unlock_timeout_timer = None
+        logging.info(f"Door {self.name} unlock timeout, relocking")
+        return self.reactor.NEVER
 
     def _handle_door_open(self, eventtime):
         door_function = "Disabled"
@@ -103,14 +129,14 @@ class Door:
         gcode.run_script_from_command(script)
         gcmd.respond_info(f"Door function set to: {standardized_function}")
 
-    def set_door_lock(self, door_name, state):
+    def set_door_lock(self, state, door_name=None):
         if state not in ["lock", "unlock"]:
             return f"Error: STATE must be either 'lock' or 'unlock'"
         locked = state == "lock"
         eventtime = self.printer.get_reactor().monotonic()
         door_instances = getattr(self.printer, '_door_instances', {})
 
-        if door_name == "all":
+        if door_name is None:
             if not door_instances:
                 return "No door instances found" 
             for name, door in door_instances.items():
@@ -125,35 +151,20 @@ class Door:
         return f"Door '{door_name}' {'locked' if locked else 'unlocked'}"
 
     def cmd_SET_DOOR_LOCK(self, gcmd):
-        door_name = gcmd.get("DOOR", "all").lower()
+        door_name = gcmd.get("DOOR", None)
         state = gcmd.get("STATE", "").lower()
-        response = self.set_door_lock(door_name, state)
+        response = self.set_door_lock(state, door_name)
         if response.startswith("Error:"):
             raise gcmd.error(response[7:])
         gcmd.respond_info(response)
 
     def _handle_set_lock_webhook(self, web_request):
         door_name = web_request.get_str("door", "all").lower()
+        if door_name == "all":
+            door_name = None
         state = web_request.get_str("state", "").lower()
-        response = self.set_door_lock(door_name, state)
+        response = self.set_door_lock(state, door_name)
         web_request.send({"result": response})
-
-    def cmd_START_PRINT(self, gcmd):
-        door_function = "Disabled"
-        try:
-            door_function = self.save_variables.allVariables.get("door_detect", "Disabled")
-        except Exception as e:
-            logging.error(f"Error getting door function: {e}")
-
-        if door_function == "Disabled":
-            if hasattr(self, 'prev_START_PRINT') and self.prev_START_PRINT:
-                self.prev_START_PRINT(gcmd)
-            return
-        gcode = self.printer.lookup_object('gcode')
-        gcode.respond_info("action:prompt_begin")
-        gcode.respond_info("action:prompt_text Printer door is opened. Please close the door and then start printing.")
-        gcode.respond_info("action:prompt_footer_button Ok|RESPOND TYPE=command MSG=action:prompt_end")
-        gcode.respond_info("action:prompt_show")
 
     def get_status(self, eventtime=None):
         door_function = "Disabled"
@@ -170,7 +181,8 @@ class Door:
         for door_name, door in door_instances.items():
             status['doors'][door_name] = {
                 'locked': door.locked,
-                'has_lock': door.lock_pin is not None
+                'has_lock': door.lock_pin is not None,
+                'door_state': door.door_state
             }
         return status
 
