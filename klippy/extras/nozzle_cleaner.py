@@ -10,8 +10,7 @@ class NozzleCleaner:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
-        self.printer.register_event_handler("klippy:connect",
-                                            self.handle_connect)
+        self.printer.register_event_handler("klippy:connect", self.handle_connect)
         self.name = config.get_name()
         self.clean_x_min = config.getfloat('clean_x_min')
         self.clean_x_max = config.getfloat('clean_x_max')
@@ -22,6 +21,7 @@ class NozzleCleaner:
         self.run_y_min, self.run_y_max = self.clean_y_min, self.clean_y_max
 
         self.clean_z_height = config.getfloat('clean_z_height', 2.0)
+        self.clean_retract = config.getfloat('clean_retract', 10.0)
         self.retract_z_height = config.getfloat('retract_z_height', 20.0)
         self.move_speed = config.getfloat('move_speed', 6000.0)
         self.clean_speed = config.getfloat('clean_speed', 4000.0)
@@ -33,8 +33,7 @@ class NozzleCleaner:
         self.x_step = (self.run_x_max - self.run_x_min) / self.nozzle_loop_x
         self.y_step = (self.run_y_max - self.run_y_min) / self.nozzle_loop_y
         self.printer.add_object('nozzle_cleaner', self)
-        self.gcode.register_command('CLEAN_NOZZLE', self.cmd_CLEAN_NOZZLE,
-                                    desc=self.cmd_CLEAN_NOZZLE_help)
+        self.gcode.register_command('CLEAN_NOZZLE', self.cmd_CLEAN_NOZZLE, desc=self.cmd_CLEAN_NOZZLE_help)
 
     def handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -58,18 +57,39 @@ class NozzleCleaner:
     def cmd_CLEAN_NOZZLE(self, gcmd):
         try:
             self.apply_offset()
-            self._set_temperature(self.hotend_temp, wait=False)
+            
+            target_extruder = gcmd.get('EXTRUDER', None)
+            
+            extruder_index = []
+            if target_extruder is not None:
+                for i, extruder in enumerate(self.extruders):
+                    if extruder.get_name() == target_extruder:
+                        extruder_index = [i]
+                        break
+                else:
+                    raise gcmd.error(f"Extruder {target_extruder} not found")
+            else:
+                extruder_index = list(range(len(self.extruders)))
+            
+            self._set_temperature(self.hotend_temp, wait=False, index=extruder_index)
             self._ensure_homed()
-            self._set_temperature(self.hotend_temp)
+            self._set_temperature(self.hotend_temp, wait=True, index=extruder_index)
             self.gcode.run_script_from_command(f'G90')
-            for i, extruder in enumerate(self.extruders):
+            
+            for i in extruder_index:
                 self.gcode.run_script_from_command(f'T{i}')
                 self._move_to_clean_position()
+                self.gcode.run_script_from_command(f'_CLIENT_LINEAR_MOVE E=-{self.clean_retract} F=300')
                 self._turn_off_heaters(i)
                 self._clean_nozzle()
                 self._return_to_safe_position()
+            
             self.gcode.run_script_from_command(f'T0')
-            gcmd.respond_info(f"All nozzles cleaning completed")
+            
+            if target_extruder:
+                gcmd.respond_info(f"Extruder {target_extruder} cleaning completed")
+            else:
+                gcmd.respond_info(f"All nozzles cleaning completed")
         except Exception as e:
             logging.exception(f"Error during nozzle cleaning: {str(e)}")
             try:
@@ -97,11 +117,15 @@ class NozzleCleaner:
             'z' not in kin_status['homed_axes']):
             self.gcode.run_script_from_command('G28')
 
-    def _set_temperature(self, temp, wait=True):
-        for i, _ in enumerate(self.extruders):
+    def _set_temperature(self, temp, wait=True, index=None):
+        if index is None:
+            index = range(len(self.extruders))
+        
+        for i in index:
             self.gcode.run_script_from_command(f' M104 T{i} S{temp}')
+        
         if wait:
-            for i, _ in enumerate(self.extruders):
+            for i in index:
                 self.gcode.run_script_from_command(f' M109 T{i} S{temp}')
 
     def _move_to_clean_position(self):
@@ -152,3 +176,4 @@ class NozzleCleaner:
 
 def load_config(config):
     return NozzleCleaner(config)
+
