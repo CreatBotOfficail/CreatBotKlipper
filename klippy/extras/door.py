@@ -23,7 +23,6 @@ class Door:
         door_pin = config.get('pin')
         buttons = self.printer.load_object(config, 'buttons')
         buttons.register_debounce_button(door_pin, self._door_status_handler, config)
-        self.save_variables = self.printer.lookup_object('save_variables')
         self.locked = False
         self.door_state = True
         self.lock_timer = None
@@ -58,7 +57,10 @@ class Door:
                 self._delay_lock_callback, eventtime + self.delay_time)
     
     def _delay_lock_callback(self, eventtime):
-        self._set_lock_state(True, eventtime)
+        save_variables = self.printer.lookup_object('save_variables')
+        auto_door_lock = save_variables.allVariables.get("auto_door_lock", False)
+        if auto_door_lock:
+            self._set_lock_state(True, eventtime)
         self.lock_timer = None
         logging.info(f"Door {self.name} closed")
         return self.reactor.NEVER
@@ -83,17 +85,16 @@ class Door:
                 self.unlock_timeout_timer = None
     
     def _unlock_timeout_callback(self, eventtime):
-        self._set_lock_state(True, eventtime)
+        save_variables = self.printer.lookup_object('save_variables')
+        auto_door_lock = save_variables.allVariables.get("auto_door_lock", False)
+        if auto_door_lock:
+            self._set_lock_state(True, eventtime)
         self.unlock_timeout_timer = None
-        logging.info(f"Door {self.name} unlock timeout, relocking")
         return self.reactor.NEVER
 
     def _handle_door_open(self, eventtime):
-        door_function = "Disabled"
-        try:
-            door_function = self.save_variables.allVariables.get("door_detect", "Disabled")
-        except Exception as e:
-            logging.error(f"Error getting door function: {e}")
+        save_variables = self.printer.lookup_object('save_variables')
+        door_function = save_variables.allVariables.get("door_detect", "Disabled")
 
         print_stats = self.printer.lookup_object('print_stats')
         status = print_stats.get_status(eventtime)
@@ -167,11 +168,8 @@ class Door:
         web_request.send({"result": response})
 
     def get_status(self, eventtime=None):
-        door_function = "Disabled"
-        try:
-            door_function = self.save_variables.allVariables.get("door_detect", "Disabled")
-        except Exception as e:
-            logging.error(f"Error getting door function: {e}")
+        save_variables = self.printer.lookup_object('save_variables')
+        door_function = save_variables.allVariables.get("door_detect", "Disabled")
         status = {
             'door_function': door_function,
             'doors': {}
