@@ -155,8 +155,8 @@ class CalibrationData:
 class CameraCalibrationSession:
     def __init__(self):
         self.points = [
-            [0, -1.0], [1.0, 0], [0, 1.0], [0, 0.1], [-1, 0],
-            [-1.0, 0], [0, -1.0], [0, -1.0], [1.0, 0], [0, 0.8],
+            [-1.0, 1.0], [0, -2.0], [2.0, 2.0], [-2.0, -1.0], [2.0, -1.0],
+            [-1.0, 2.0], [1.0, -1.0], [-1.0, -1.0], [-0.5, 0.5], [0.8, 0.8],
         ]
         self.current_index = 0
         self.start_xy = None
@@ -178,7 +178,9 @@ class Ktamv:
         self.center_position = None
 
         self.operation_retries = 0
-        self.max_retries = 30
+        self.calibration_retries = 0
+        self.max_retries = config.getint('max_retries', 20)
+        self.max_calibration_retries = config.getint('max_calibration_retries', 3)
         self.adjusted_gain = self.gain
 
         self.pm = None
@@ -655,8 +657,8 @@ class Ktamv:
             if self.calibration_data.transform_matrix is not None:
                 offsets = -self.adjusted_gain * (self.calibration_data.transform_matrix @ calibration_vector)
                 offsets = [round(x, 3) for x in offsets]
-                if self.adjusted_gain > 0.4:
-                    self.adjusted_gain -= 0.03
+                if self.adjusted_gain > 0.48:
+                    self.adjusted_gain -= 0.01
 
                 self.gcmd.respond_info(
                     f"Nozzle calibration gain {self.adjusted_gain:.2f} attempt {self.operation_retries + 1}:\n"
@@ -681,10 +683,8 @@ class Ktamv:
 
                 if (new_uv[0] > FRAME_WIDTH or new_uv[0] < 0 or
                     new_uv[1] > FRAME_HEIGHT or new_uv[1] < 0):
-                    raise self.gcmd.error(
-                        "Calibration would move nozzle outside camera frame. "
-                        "This is likely due to bad mm/px calibration."
-                    )
+                    self._retry_camera_calibration("Calibration would move nozzle outside camera frame")
+                    return
                 original_speed = self.pm.speed
                 try:
                     self.pm.speed = 500
@@ -693,7 +693,8 @@ class Ktamv:
                     self.pm.speed = original_speed
                 self.operation_retries += 1
                 if self.operation_retries >= self.max_retries:
-                    self._handle_operation_failure("Nozzle calibration reached maximum retries")
+                    self._retry_camera_calibration("Nozzle calibration reached maximum retries")
+                    return
                 self.reactor.register_callback(
                     lambda e: self._call_remote_method("get_nozzle_position"),
                     self.reactor.monotonic() + 0.5
@@ -704,7 +705,8 @@ class Ktamv:
 
     def _handle_nozzle_not_found(self):
         if self.operation_retries >= self.max_retries:
-            self._handle_operation_failure("Nozzle not found after maximum retries")
+            self._retry_camera_calibration("Nozzle not found after maximum retries")
+            return
 
         wiggle_patterns = [(0.3, 0), (-0.5, 0), (0.3, 0.3), (0, -0.5)]
         wiggle_index = self.operation_retries % len(wiggle_patterns)
@@ -801,9 +803,30 @@ class Ktamv:
             self.calibration_state['error'] = error_msg
         self.gcode.respond_raw(f'!! {error_msg}')
         raise self.gcode.error(f"{error_msg}")
+    
+    def _retry_camera_calibration(self, retry_message):
+        """Retry camera calibration with proper state reset"""
+        self.calibration_retries += 1
+        if self.calibration_retries > self.max_calibration_retries:
+            self._handle_operation_failure(f"{retry_message} after all calibration attempts")
+        
+        # Reset calibration to camera calibration step
+        self.gcode.respond_info(
+            f"{retry_message}. Retrying camera calibration ({self.calibration_retries}/{self.max_calibration_retries})..."
+        )
+        self.current_state = CalibrationState.IDLE
+        self._cleanup_operation()
+        
+        # Reset calibration state to camera calibration step
+        if hasattr(self, 'calibration_state'):
+            self.calibration_state['step'] = CalibrationStep.START_CAMERA_CALIBRATION
+            self.calibration_state['camera_calibrated'] = False
+            self.calibration_data.clear()
+        return
 
     def _cleanup_operation(self):
         self.operation_retries = 0
+        self.calibration_retries = 0
         self.adjusted_gain = self.gain
         if self.camera_calibration:
             self.camera_calibration = None
@@ -828,70 +851,63 @@ class Ktamv_Utl:
         mpps: list, space_coordinates: list, camera_coordinates: list, gcmd
     ):
         try:
-            # Save initial mpps for later comparison
-            initial_mpps = mpps.copy()
+            original_count = len(mpps)
+            
+            if original_count < 3:
+                raise ValueError(f"Need at least 3 points, current: {original_count}")
+            
+            mpps_np = np.array(mpps)
 
-            # Calculate the average mm per pixel and the standard deviation
-            mpps_std_dev, mpp = self._get_std_dev_and_mean(mpps)
+            median = np.median(mpps_np)
+            mad = np.median(np.abs(mpps_np - median))
 
-            # Exclude the highest value if it deviates more than 20% from the mean
-            if max(mpps) > mpp + (mpp * 0.20):
-                __max_index = mpps.index(max(mpps))
-                mpps.pop(__max_index)
-                space_coordinates.pop(__max_index)
-                camera_coordinates.pop(__max_index)
+            sigma_estimate = mad / 0.6745 if mad > 0 else 0
 
-            # Calculate the average mm per pixel and the standard deviation
-            mpps_std_dev, mpp = self._get_std_dev_and_mean(mpps)
+            threshold = 3 * sigma_estimate if sigma_estimate > 0 else 0
 
-            # Exclude the lowest value if it deviates more than 20% from the mean
-            if min(mpps) < mpp - (mpp * 0.20):
-                __min_index = mpps.index(min(mpps))
-                mpps.pop(__min_index)
-                space_coordinates.pop(__min_index)
-                camera_coordinates.pop(__min_index)
-
-            # Calculate the average mm per pixel and the standard deviation
-            mpps_std_dev, mpp = self._get_std_dev_and_mean(mpps)
-
-            # Exclude values more than 2 standard deviations from mean
-            for i in reversed(range(len(mpps))):
-                if mpps[i] > mpp + (mpps_std_dev * 2) or mpps[i] < mpp - (mpps_std_dev * 2):
-                    mpps.pop(i)
-                    space_coordinates.pop(i)
-                    camera_coordinates.pop(i)
-
-            # Calculate the average mm per pixel and the standard deviation
-            mpps_std_dev, mpp = self._get_std_dev_and_mean(mpps)
-
-            # Exclude any other value that deviates more than 25% from mean value
-            for i in reversed(range(len(mpps))):
-                if mpps[i] > mpp + (mpp * 0.25) or mpps[i] < mpp - (mpp * 0.25):
-                    mpps.pop(i)
-
-            # Calculate the average mm per pixel and the standard deviation
-            mpps_std_dev, mpp = self._get_std_dev_and_mean(mpps)
-
-            # Final check if standard deviation is still too high
-            gcmd.respond_info(
-                (
-                    "Final mm/pixel is %.4f with a std. dev. of %.1f"
-                    % (mpp, (mpps_std_dev / mpp) * 100)
-                )
-                + "%" + (
-                    ".\n Final mm/px is calculated from %d of %d values"
-                    % (len(mpps), len(initial_mpps))
-                )
-            )
-
-            if mpps_std_dev / mpp > 0.2:
-                gcmd.respond_info(
-                    "Standard deviation is still too high. Calibration failed."
-                )
-                return None
-            return mpp, mpps, space_coordinates, camera_coordinates
+            valid_indices = []
+            filtered_mpps = []
+            filtered_space = []
+            filtered_camera = []
+            
+            for i, mpp in enumerate(mpps):
+                if abs(mpp - median) <= threshold:
+                    valid_indices.append(i)
+                    filtered_mpps.append(mpp)
+                    filtered_space.append(space_coordinates[i])
+                    filtered_camera.append(camera_coordinates[i])
+            if len(filtered_mpps) < 3:
+                raise ValueError(f"Insufficient points after filtering: {len(filtered_mpps)}/{original_count}")
+            weighted_mpps = []
+            weights = []
+            
+            for i in range(len(filtered_mpps)):
+                distances = []
+                for j in range(len(filtered_mpps)):
+                    if i != j:
+                        dx = filtered_space[j][0] - filtered_space[i][0]
+                        dy = filtered_space[j][1] - filtered_space[i][1]
+                        distances.append(np.sqrt(dx**2 + dy**2))
+                
+                weight = np.mean(distances) if distances else 1
+                weights.append(weight)
+                weighted_mpps.append(filtered_mpps[i] * weight)
+            
+            if sum(weights) > 0:
+                weighted_mean = sum(weighted_mpps) / sum(weights)
+            else:
+                weighted_mean = np.mean(filtered_mpps)
+            
+            std_dev = np.std(filtered_mpps)
+            cv = std_dev / weighted_mean
+            
+            if cv > 0.15:
+                gcmd.respond_info("Warning: Coefficient of variation exceeds 15%, re-calibration recommended")
+            
+            return weighted_mean, filtered_mpps, filtered_space, filtered_camera
+            
         except Exception as e:
-            logging.error(f"Error in get_average_mpp: {str(e)}")
+            logging.error(f"Error in get_average_mpp_simple: {str(e)}")
             raise
 
     @staticmethod
