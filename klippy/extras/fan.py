@@ -11,6 +11,9 @@ class Fan:
         self.last_fan_value = self.last_req_value = 0.
         # Read config
         self.max_power = config.getfloat('max_power', 1., above=0., maxval=1.)
+        # Full speed mode support
+        self._original_speed = None
+        self._full_speed_mode = False
         self.kick_start_time = config.getfloat('kick_start_time', 0.1,
                                                minval=0.)
         self.off_below = config.getfloat('off_below', default=0.,
@@ -49,7 +52,10 @@ class Fan:
     def _apply_speed(self, print_time, value):
         if value < self.off_below:
             value = 0.
-        value = max(0., min(self.max_power, value * self.max_power))
+        if self._full_speed_mode:
+            value = 1.0
+        else:
+            value = max(0., min(self.max_power, value * self.max_power))
         if value == self.last_fan_value:
             return "discard", 0.
         if self.enable_pin:
@@ -72,6 +78,19 @@ class Fan:
         self.gcrq.queue_gcode_request(value)
     def _handle_request_restart(self, print_time):
         self.set_speed(0., print_time)
+    def set_full_speed(self, enable=True):
+        if enable and not self._full_speed_mode:
+            self._original_speed = self.last_req_value
+            self._full_speed_mode = True
+            self.set_speed_from_command(1.0)
+        elif not enable and self._full_speed_mode:
+            restore_speed = self._original_speed if self._original_speed is not None else 0.0
+            self.set_speed_from_command(restore_speed)
+            self._original_speed = None
+            self._full_speed_mode = False
+
+    def set_original_speed(self, value):
+        self._original_speed = value
 
     def get_status(self, eventtime):
         tachometer_status = self.tachometer.get_status(eventtime)
@@ -108,15 +127,23 @@ class PrinterFan:
         gcode = config.get_printer().lookup_object('gcode')
         gcode.register_command("M106", self.cmd_M106)
         gcode.register_command("M107", self.cmd_M107)
+        gcode.register_command("SET_FAN_FULL_SPEED", self.cmd_SET_FAN_FULL_SPEED)
     def get_status(self, eventtime):
-        return self.fan.get_status(eventtime)
+        status = self.fan.get_status(eventtime)
+        status['full_speed_mode'] = self.fan._full_speed_mode
+        return status
     def cmd_M106(self, gcmd):
         # Set fan speed
         value = gcmd.get_float('S', 255., minval=0.) / 255.
+        self.fan.set_original_speed(value)
         self.fan.set_speed_from_command(value)
     def cmd_M107(self, gcmd):
         # Turn fan off
+        self.fan.set_original_speed(0)
         self.fan.set_speed_from_command(0.)
+    def cmd_SET_FAN_FULL_SPEED(self, gcmd):
+        enable = gcmd.get_int('ENABLE', 1, minval=0, maxval=1) != 0
+        self.fan.set_full_speed(enable)
 
 def load_config(config):
     return PrinterFan(config)
