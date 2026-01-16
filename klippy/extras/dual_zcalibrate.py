@@ -58,6 +58,7 @@ class DualProbeCalibrator:
         self._waiting = False
         self.next_callback = None
         self.x_offset = self.y_offset = 0
+        self.z_calibrate_compensation = 0.
         self.base_x_offset = config.getfloat('base_x_offset', 0.)
         self.max_z_offset = config.getfloat('max_z_offset', 0.)
         self.gcode.register_command(
