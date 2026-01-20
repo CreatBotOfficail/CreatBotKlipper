@@ -342,6 +342,9 @@ class ProbeEddyParams:
 
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)
+        self.temp_stable_timeout = config.getfloat("temp_stable_timeout", 300.0, above=0.0)
+        self.temp_stable_tolerance = config.getfloat("temp_stable_tolerance", 0.1, above=0.0)
+        self.temp_stable_interval = config.getfloat("temp_stable_interval", 30.0, above=0.0)
 
         self.validate(config)
 
@@ -849,6 +852,51 @@ class ProbeEddy:
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
 
+    def _is_temperature_stable(self, gcmd:GCodeCommand):
+            try:
+                temp_probe = self._printer.lookup_object("temp_probe_%s" % (self._name,))
+            except Exception:
+                return True
+            reactor = self._printer.get_reactor()
+            start_time = reactor.monotonic()
+            max_timeout = self.params.temp_stable_timeout
+            interval = self.params.temp_stable_interval
+            temp_samples = []
+            gcmd.respond_info("Checking temperature stability...")
+
+            while reactor.monotonic() - start_time < max_timeout:
+                current_temp, _ = temp_probe.get_temp()
+                temp_samples.append(current_temp)
+                if len(temp_samples) > int(interval):
+                    temp_samples.pop(0)
+                if len(temp_samples) >= int(interval):
+                    max_temp = max(temp_samples)
+                    min_temp = min(temp_samples)
+                    temp_range = max_temp - min_temp
+
+                    if temp_range <= self.params.temp_stable_tolerance:
+                        gcmd.respond_info(f"Temperature stable: {current_temp:.2f}°C (range: {temp_range:.2f}°C)")
+                        return True
+
+                    elapsed = reactor.monotonic() - start_time
+                    if int(elapsed) % 30 == 0:
+                        gcmd.respond_info(f"Current temperature: {current_temp:.2f}°C (range: {temp_range:.2f}°C), Waiting for temperature to stabilize.")
+                reactor.pause(reactor.monotonic() + 1.0)
+
+            if len(temp_samples) >= int(interval):
+                max_temp = max(temp_samples)
+                min_temp = min(temp_samples)
+                temp_range = max_temp - min_temp
+                
+                if temp_range <= self.params.temp_stable_tolerance:
+                    gcmd.respond_info(f"Temperature stable after {max_timeout:.0f}s: {temp_samples[-1]:.2f}°C (range: {temp_range:.2f}°C)")
+                    return True
+                else:
+                    gcmd.respond_info(f"Temperature unstable after {max_timeout:.0f}s: range {temp_range:.2f}°C (max: {max_temp:.2f}°C, min: {min_temp:.2f}°C)")
+                    return False
+            else:
+                return True
+
     def cmd_MESH(self, gcmd: GCodeCommand):
         self._bed_mesh_helper.scan()
 
@@ -1109,6 +1157,8 @@ class ProbeEddy:
             # at the right place
             self._z_hop()
 
+        if not self._is_temperature_stable(gcmd):
+            raise self._printer.command_error("Temperature is not stable. Please wait for temperature to stabilize before running setup.")
         # Now reset the axis so that we have a full range to calibrate with
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
