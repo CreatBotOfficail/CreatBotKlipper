@@ -776,7 +776,6 @@ class Ktamv:
         if nozzle_cleaner is not None:
             script = "CLEAN_NOZZLE"
             self.gcode.run_script_from_command(script)
-            self.gcode.run_script_from_command(script)
             toolhead = self.printer.lookup_object("toolhead")
             toolhead.wait_moves()
         else:
