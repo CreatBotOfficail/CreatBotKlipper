@@ -77,7 +77,7 @@ class NozzleCleaner:
             self.gcode.run_script_from_command(f'G90')
             
             for i in extruder_index:
-                self.gcode.run_script_from_command(f'T{i}')
+                self.gcode.run_script_from_command(f'T{i} CHECKFILA False')
                 self._move_to_clean_position()
                 self.gcode.run_script_from_command(f'_CLIENT_LINEAR_MOVE E=-{self.clean_retract} F=300')
                 self._turn_off_heaters(i)
