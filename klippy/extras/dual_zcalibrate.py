@@ -62,12 +62,12 @@ class DualProbeCalibrator:
         self.base_x_offset = config.getfloat('base_x_offset', 0.)
         self.max_z_offset = config.getfloat('max_z_offset', 0.)
         self.gcode.register_command(
-            'DUAL_PROBE_CALIBRATE',
-            self.cmd_DUAL_PROBE_CALIBRATE,
+            'DUAL_Z_PROBE_CALIBRATE',
+            self.cmd_DUAL_Z_PROBE_CALIBRATE,
             desc="Automatically calibrate dual-nozzle offset"
         )
 
-    def cmd_DUAL_PROBE_CALIBRATE(self, gcmd):
+    def cmd_DUAL_Z_PROBE_CALIBRATE(self, gcmd):
         if self.state != CalibrationState.INIT:
             gcmd.respond_info("A calibration process is already running. Please complete it first or restart the printer")
             return
