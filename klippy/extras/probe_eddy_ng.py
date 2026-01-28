@@ -342,6 +342,9 @@ class ProbeEddyParams:
 
         self.x_offset = config.getfloat("x_offset", self.x_offset)
         self.y_offset = config.getfloat("y_offset", self.y_offset)
+        self.temp_stable_timeout = config.getfloat("temp_stable_timeout", 300.0, above=0.0)
+        self.temp_stable_tolerance = config.getfloat("temp_stable_tolerance", 0.1, above=0.0)
+        self.temp_stable_interval = config.getfloat("temp_stable_interval", 30.0, above=0.0)
 
         self.validate(config)
 
@@ -588,7 +591,7 @@ class ProbeEddy:
 
     def _log_debug(self, msg):
         if self.params.debug:
-            logging.info(f"{self._name}: {msg}")
+            logging.debug(f"{self._name}: {msg}")
 
     def define_commands(self, gcode):
         gcode.register_command("PROBE_EDDY_NG_STATUS", self.cmd_STATUS, self.cmd_STATUS_help)
@@ -848,6 +851,51 @@ class ProbeEddy:
                     data_file.write(f"{times[i]},{freqs[i]},{heights[i] if heights else ''},{past_k_z},{past_v},{raw_freqs[i]},{trigger_time},{tap_start_time}\n")
             logging.info(f"Wrote {len(times)} samples to {self.save_samples_path}")
             self.save_samples_path = None
+
+    def _is_temperature_stable(self, gcmd:GCodeCommand):
+            try:
+                temp_probe = self._printer.lookup_object("temp_probe_%s" % (self._name,))
+            except Exception:
+                return True
+            reactor = self._printer.get_reactor()
+            start_time = reactor.monotonic()
+            max_timeout = self.params.temp_stable_timeout
+            interval = self.params.temp_stable_interval
+            temp_samples = []
+            gcmd.respond_info("Checking temperature stability...")
+
+            while reactor.monotonic() - start_time < max_timeout:
+                current_temp, _ = temp_probe.get_temp()
+                temp_samples.append(current_temp)
+                if len(temp_samples) > int(interval):
+                    temp_samples.pop(0)
+                if len(temp_samples) >= int(interval):
+                    max_temp = max(temp_samples)
+                    min_temp = min(temp_samples)
+                    temp_range = max_temp - min_temp
+
+                    if temp_range <= self.params.temp_stable_tolerance:
+                        gcmd.respond_info(f"Temperature stable: {current_temp:.2f}°C (range: {temp_range:.2f}°C)")
+                        return True
+
+                    elapsed = reactor.monotonic() - start_time
+                    if int(elapsed) % 30 == 0:
+                        gcmd.respond_info(f"Current temperature: {current_temp:.2f}°C (range: {temp_range:.2f}°C), Waiting for temperature to stabilize.")
+                reactor.pause(reactor.monotonic() + 1.0)
+
+            if len(temp_samples) >= int(interval):
+                max_temp = max(temp_samples)
+                min_temp = min(temp_samples)
+                temp_range = max_temp - min_temp
+                
+                if temp_range <= self.params.temp_stable_tolerance:
+                    gcmd.respond_info(f"Temperature stable after {max_timeout:.0f}s: {temp_samples[-1]:.2f}°C (range: {temp_range:.2f}°C)")
+                    return True
+                else:
+                    gcmd.respond_info(f"Temperature unstable after {max_timeout:.0f}s: range {temp_range:.2f}°C (max: {max_temp:.2f}°C, min: {min_temp:.2f}°C)")
+                    return False
+            else:
+                return True
 
     def cmd_MESH(self, gcmd: GCodeCommand):
         self._bed_mesh_helper.scan()
@@ -1109,6 +1157,8 @@ class ProbeEddy:
             # at the right place
             self._z_hop()
 
+        if not self._is_temperature_stable(gcmd):
+            raise self._printer.command_error("Temperature is not stable. Please wait for temperature to stabilize before running setup.")
         # Now reset the axis so that we have a full range to calibrate with
         th = self._printer.lookup_object("toolhead")
         th_pos = th.get_position()
@@ -1224,18 +1274,11 @@ class ProbeEddy:
 
             if state == FINDING_HOMING and ok_for_homing:
                 self._dc_to_fmap[drive_current] = mapping
-                self._reg_drive_current = drive_current
-                self._log_msg(f"using {drive_current} for homing.")
-                state = FINDING_TAP
-
-            if state == FINDING_TAP and ok_for_tap:
-                self._dc_to_fmap[drive_current] = mapping
-                self._tap_drive_current = drive_current
-                self._log_msg(f"using {drive_current} for tap.")
+                self._reg_drive_current = self._tap_drive_current = drive_current
                 state = DONE
 
             if state == DONE:
-                result_msg = "Setup success. Please check whether homing works with G28 Z, then check if tap works with PROBE_EDDY_NG_TAP."
+                result_msg = "Setup success. Please check whether homing works with G28 Z"
                 break
 
             if drive_current - start_drive_current >= max_dc_increase:
@@ -1258,9 +1301,14 @@ class ProbeEddy:
 
         if state > FINDING_HOMING:
             self.reset_drive_current()
-            self.save_config()
 
-        self._z_not_homed()
+            eventtime = self._reactor.monotonic()
+            print_stats = self._printer.lookup_object('print_stats')
+            status = print_stats.get_status(eventtime)
+            state = status.get('state', 'standby')
+            if state not in ("printing", "paused"):
+                self.save_config()
+                self._z_not_homed()
 
     cmd_CALIBRATE_help = (
         "Calibrate the eddy current sensor. Specify DRIVE_CURRENT to calibrate for a different drive current "
@@ -2248,7 +2296,17 @@ class ProbeEddyScanningProbe:
         if not self.eddy._z_homed():
             raise self._printer.command_error("Z axis must be homed before probing")
 
-        self.eddy.probe_to_start_position()
+        th_pos = self._toolhead.get_position()
+        current_z = th_pos[2]
+
+        probe_result = self.eddy.probe_static_height()
+        if not probe_result.valid:
+            raise self._printer.command_error("Failed to get valid probe height reading")
+
+        probe_height = probe_result.value
+        self._tap_offset = current_z - probe_height
+        logging.info(f"current z:{current_z}, probe height:{probe_height}, offset:{self._tap_offset}")
+        self.eddy.probe_to_start_position(current_z)
         self._sampler = self.eddy.start_sampler()
 
     def end_probe_session(self):

@@ -117,6 +117,10 @@ class TemperatureProbe:
         self.sensor.setup_minmax(self.min_temp, self.max_temp)
         self.sensor.setup_callback(self._temp_callback)
         pheaters.register_sensor(config, self)
+        pname = self.name.split(maxsplit=1)[-1]
+        if pname.startswith("_"):
+            pname = pname[1:]
+        self.printer.add_object("temp_probe_%s" % (pname,), self)
         self.last_temp_read_time = 0.
         self.last_measurement = (0., 99999999., 0.,)
         # Calibration State
@@ -132,7 +136,6 @@ class TemperatureProbe:
         self.start_pos = []
 
         # Register GCode Commands
-        pname = self.name.split(maxsplit=1)[-1]
         self.gcode.register_mux_command(
             "TEMPERATURE_PROBE_CALIBRATE", "PROBE", pname,
             self.cmd_TEMPERATURE_PROBE_CALIBRATE,
