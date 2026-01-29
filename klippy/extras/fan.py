@@ -66,9 +66,10 @@ class Fan:
         if (value and self.kick_start_time
             and (not self.last_fan_value or value - self.last_fan_value > .5)):
             # Run fan at full speed for specified kick_start_time
+            max_power = 1.0 if self._full_speed_mode else self.max_power
             self.last_req_value = value
-            self.last_fan_value = self.max_power
-            self.mcu_fan.set_pwm(print_time, self.max_power)
+            self.last_fan_value = max_power
+            self.mcu_fan.set_pwm(print_time, max_power)
             return "delay", self.kick_start_time
         self.last_fan_value = self.last_req_value = value
         self.mcu_fan.set_pwm(print_time, value)
