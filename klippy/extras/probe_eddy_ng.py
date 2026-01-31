@@ -1302,13 +1302,13 @@ class ProbeEddy:
         if state > FINDING_HOMING:
             self.reset_drive_current()
 
-            eventtime = self._reactor.monotonic()
-            print_stats = self._printer.lookup_object('print_stats')
-            status = print_stats.get_status(eventtime)
-            state = status.get('state', 'standby')
-            if state not in ("printing", "paused"):
-                self.save_config()
-                self._z_not_homed()
+            # eventtime = self._reactor.monotonic()
+            # print_stats = self._printer.lookup_object('print_stats')
+            # status = print_stats.get_status(eventtime)
+            # state = status.get('state', 'standby')
+            # if state not in ("printing", "paused"):
+            #     self.save_config()
+            #     self._z_not_homed()
 
     cmd_CALIBRATE_help = (
         "Calibrate the eddy current sensor. Specify DRIVE_CURRENT to calibrate for a different drive current "
