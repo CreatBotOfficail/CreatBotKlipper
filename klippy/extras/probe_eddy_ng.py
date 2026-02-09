@@ -853,9 +853,12 @@ class ProbeEddy:
             self.save_samples_path = None
 
     def _is_temperature_stable(self, gcmd:GCodeCommand):
-            try:
-                temp_probe = self._printer.lookup_object("temp_probe_%s" % (self._name,))
-            except Exception:
+            temp_probe = None
+            for obj_name, obj in self._printer.lookup_objects():
+                if obj_name.startswith("temperature_probe") and self._name in obj_name:
+                    temp_probe = obj
+                    break
+            if not temp_probe:
                 return True
             reactor = self._printer.get_reactor()
             start_time = reactor.monotonic()
