@@ -115,7 +115,12 @@ class NozzleCleaner:
         if ('x' not in kin_status['homed_axes'] or
             'y' not in kin_status['homed_axes'] or
             'z' not in kin_status['homed_axes']):
-            self.gcode.run_script_from_command('G28')
+
+            self.gcode.run_script_from_command('G28 XY')
+            safe_z_home = self.printer.lookup_object('safe_z_home')
+            self.toolhead.manual_move([self.run_x_min, self.run_y_min+100], self.move_speed)
+            g28_gcmd = self.gcode.create_gcode_command("G28", "G28", {'Z': '0'})
+            safe_z_home.prev_G28(g28_gcmd)
 
     def _set_temperature(self, temp, wait=True, index=None):
         if index is None:
