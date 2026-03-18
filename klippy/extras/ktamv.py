@@ -264,7 +264,7 @@ class Ktamv:
         if result.get("status") == "error":
             error_msg = result.get('message', 'Unknown error')
             logging.error(f"Nozzle position error: {error_msg}")
-            self._handle_operation_failure(error_msg)
+            self._retry_camera_calibration(error_msg)
             return
         state_handlers = {
             CalibrationState.CAMERA_CALIBRATION: self._process_calibration_position,
@@ -374,6 +374,7 @@ class Ktamv:
     )
     def cmd_KTAMV_CALIB_NOZZLE(self, gcmd):
         gcmd.respond_info("Starting nozzle calibration")
+        self.calibration_retries = 0
         try:
             self.calibration_state = {
                 'step': CalibrationStep.INITIALIZE,
@@ -807,6 +808,7 @@ class Ktamv:
         """Retry camera calibration with proper state reset"""
         self.calibration_retries += 1
         if self.calibration_retries > self.max_calibration_retries:
+            self.calibration_retries = 0
             self._handle_operation_failure(f"{retry_message} after all calibration attempts")
         
         # Reset calibration to camera calibration step
@@ -825,7 +827,6 @@ class Ktamv:
 
     def _cleanup_operation(self):
         self.operation_retries = 0
-        self.calibration_retries = 0
         self.adjusted_gain = self.gain
         if self.camera_calibration:
             self.camera_calibration = None
