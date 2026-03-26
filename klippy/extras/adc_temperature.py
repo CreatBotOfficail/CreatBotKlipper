@@ -13,7 +13,7 @@ import logging, bisect
 SAMPLE_TIME = 0.001
 SAMPLE_COUNT = 8
 REPORT_TIME = 0.300
-RANGE_CHECK_COUNT = 4
+RANGE_CHECK_COUNT = 8
 
 # Interface between ADC and heater temperature callbacks
 class PrinterADCtoTemperature:
