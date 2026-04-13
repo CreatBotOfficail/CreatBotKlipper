@@ -59,6 +59,8 @@ class HeaterCheck:
             if temp <= target + self.hysteresis:
                 self.error = 0.
             if target <= 0.:
+                self.error = 0.
+                self.approaching_target = self.starting_approach = False
                 self.last_target = target
             if target == self.last_target:
                 return eventtime + 1.
