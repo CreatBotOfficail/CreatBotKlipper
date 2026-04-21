@@ -111,12 +111,12 @@ class NozzleCleaner:
 
     def _ensure_homed(self):
         curtime = self.printer.get_reactor().monotonic()
-        kin_status = self.toolhead.get_kinematics().get_status(curtime)
-        if ('x' not in kin_status['homed_axes'] or
-            'y' not in kin_status['homed_axes'] or
-            'z' not in kin_status['homed_axes']):
-
-            self.gcode.run_script_from_command('G28 XY')
+        kin_status = self.toolhead.get_status(curtime)
+        if ('x' not in kin_status['reliable_axes']):
+            self.gcode.run_script_from_command('G28 X')
+        if ('y' not in kin_status['reliable_axes']):
+            self.gcode.run_script_from_command('G28 Y')
+        if ('z' not in kin_status['reliable_axes']):
             safe_z_home = self.printer.lookup_object('safe_z_home')
             self.toolhead.manual_move([self.run_x_min, self.run_y_min+100], self.move_speed)
             g28_gcmd = self.gcode.create_gcode_command("G28", "G28", {'Z': '0'})
