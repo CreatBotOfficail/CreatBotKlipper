@@ -270,11 +270,14 @@ class PrinterHoming:
     def cmd_G28(self, gcmd):
         # Move to origin
         axes = []
+        axis_names = []
         for pos, axis in enumerate('XYZ'):
             if gcmd.get(axis, None) is not None:
                 axes.append(pos)
+                axis_names.append(axis)
         if not axes:
             axes = [0, 1, 2]
+            axis_names = ['X', 'Y', 'Z']
         homing_state = Homing(self.printer)
         homing_state.set_axes(axes)
         kin = self.printer.lookup_object('toolhead').get_kinematics()
@@ -286,6 +289,9 @@ class PrinterHoming:
                     "Homing failed due to printer shutdown")
             self.printer.lookup_object('stepper_enable').motor_off()
             raise
+        toolhead = self.printer.lookup_object('toolhead')
+        axes_str = ''.join(axis_names).lower()
+        toolhead.set_reliable_axes('add', axes_str)
 
 def load_config(config):
     return PrinterHoming(config)

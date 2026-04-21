@@ -144,6 +144,7 @@ class ForceMove:
                      x, y, z, set_homed_axes, clear_homed_axes)
         toolhead.set_position([x, y, z, curpos[3]], homing_axes=set_homed_axes)
         toolhead.get_kinematics().clear_homing_state(clear_homed_axes)
+        toolhead.set_reliable_axes('subtract', set_homed_axes)
 
 def load_config(config):
     return ForceMove(config)

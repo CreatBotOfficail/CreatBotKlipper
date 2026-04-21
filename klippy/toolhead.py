@@ -219,6 +219,7 @@ class ToolHead:
         self.lookahead = LookAheadQueue(self)
         self.lookahead.set_flush_time(BUFFER_TIME_HIGH)
         self.commanded_pos = [0., 0., 0., 0.]
+        self.reliable_axes = ''
         # Velocity and acceleration control
         self.max_velocity = config.getfloat('max_velocity', above=0.)
         self.max_accel = config.getfloat('max_accel', above=0.)
@@ -458,6 +459,14 @@ class ToolHead:
     # Movement commands
     def get_position(self):
         return list(self.commanded_pos)
+    def set_reliable_axes(self, add_subtract, reliable_axes):
+        reliable_axes = reliable_axes.lower()
+        if add_subtract == 'add':
+            combined = set(self.reliable_axes + reliable_axes)
+            self.reliable_axes = ''.join(sorted(combined, key=lambda c: 'xyz'.index(c)))
+        elif add_subtract == 'subtract':
+            for axis in reliable_axes:
+                self.reliable_axes = self.reliable_axes.replace(axis, '')
     def set_position(self, newpos, homing_axes=""):
         self.flush_step_generation()
         ffi_main, ffi_lib = chelper.get_ffi()
@@ -575,6 +584,7 @@ class ToolHead:
                      'stalls': self.print_stall,
                      'estimated_print_time': estimated_print_time,
                      'extruder': self.extruder.get_name(),
+                     'reliable_axes': self.reliable_axes,
                      'position': self.Coord(*self.commanded_pos),
                      'max_velocity': self.max_velocity,
                      'max_accel': self.max_accel,
