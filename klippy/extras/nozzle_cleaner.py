@@ -112,6 +112,8 @@ class NozzleCleaner:
     def _ensure_homed(self):
         curtime = self.printer.get_reactor().monotonic()
         kin_status = self.toolhead.get_status(curtime)
+        if self.toolhead.extruder.get_name() != 'extruder':
+            self.gcode.run_script_from_command('T0')
         if ('x' not in kin_status['reliable_axes']):
             self.gcode.run_script_from_command('G28 X')
         if ('y' not in kin_status['reliable_axes']):
