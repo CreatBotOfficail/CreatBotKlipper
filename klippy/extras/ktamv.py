@@ -16,7 +16,8 @@ class KtamvPm:
 
     def ensureHomed(self, home=True) -> bool:
         curtime = self.printer.get_reactor().monotonic()
-        kin_status = self.toolhead.get_kinematics().get_status(curtime)
+        toolhead = self.printer.lookup_object("toolhead")
+        kin_status = toolhead.get_kinematics().get_status(curtime)
         if (
             "x" not in kin_status["homed_axes"]
             or "y" not in kin_status["homed_axes"]
@@ -119,6 +120,7 @@ class CalibrationState(Enum):
     CAMERA_CALIBRATION = "camera_calibration"
     NOZZLE_CALIBRATION = "nozzle_calibration"
     SIMPLE_POSITION = "simple_position"
+    AUTO_CAMERA_CENTER = "auto_camera_center"
 
 CalibrationPoint = namedtuple('CalibrationPoint', ['space', 'camera', 'mpp'])
 class CalibrationData:
@@ -181,6 +183,9 @@ class Ktamv:
         self.calibration_retries = 0
         self.max_retries = config.getint('max_retries', 20)
         self.max_calibration_retries = config.getint('max_calibration_retries', 3)
+        self.search_step = config.getfloat('search_step', 5.0, above=0.5)
+        self.search_radius_x = config.getfloat('search_radius_x', 15.0, above=1.0)
+        self.search_radius_y = config.getfloat('search_radius_y', 15.0, above=1.0)
         self.adjusted_gain = self.gain
 
         self.pm = None
@@ -264,12 +269,18 @@ class Ktamv:
         if result.get("status") == "error":
             error_msg = result.get('message', 'Unknown error')
             logging.error(f"Nozzle position error: {error_msg}")
-            self._retry_camera_calibration(error_msg)
+            if self.current_state == CalibrationState.AUTO_CAMERA_CENTER:
+                self._process_auto_camera_center({"position": None})
+            elif self.current_state == CalibrationState.CAMERA_CALIBRATION:
+                self._process_calibration_position({"position": None})
+            else:
+                self._retry_camera_calibration(error_msg)
             return
         state_handlers = {
             CalibrationState.CAMERA_CALIBRATION: self._process_calibration_position,
             CalibrationState.NOZZLE_CALIBRATION: self._process_nozzle_calibration_position,
             CalibrationState.SIMPLE_POSITION: self._process_simple_position,
+            CalibrationState.AUTO_CAMERA_CENTER: self._process_auto_camera_center,
         }
         handler = state_handlers.get(self.current_state)
         if handler:
@@ -293,16 +304,100 @@ class Ktamv:
             self._handle_operation_failure("Camera calibration session not initialized")
             return
 
-        if not self.camera_calibration.initial_position_received:
-            if position_data is not None:
-                self.camera_calibration.start_uv = position_data
-                self.camera_calibration.initial_position_received = True
-                self.gcode.respond_info("starting calibration moves")
-                self._move_to_calibration_point(0)
-            else:
-                self._handle_operation_failure("Failed to get initial nozzle position for calibration")
-            return
+        phase = getattr(self, '_calib_phase', 'searching')
 
+        if phase == 'searching':
+            self._calib_search(position_data)
+        elif phase == 'verifying':
+            self._calib_verify(position_data)
+        elif phase == 'scaling':
+            self._calib_scaling(position_data)
+        elif phase == 'centering':
+            self._calib_centering(position_data)
+        elif phase == 'calibrating':
+            self._calib_process_point(position_data)
+
+    def _start_verify(self, position_data):
+        self.gcmd.respond_info(
+            f"Possible nozzle at search point {self._search_index + 1}"
+            f" (UV: {position_data}), verifying...")
+        self._auto_first_uv = position_data
+        self._auto_first_xy = self.pm.get_gcode_position()[:2]
+        self._schedule_detect()
+
+    def _check_verification(self, position_data):
+        """Returns True if verified (caller should proceed to scaling).
+        Returns False if verification failed (caller should continue search)."""
+        if position_data is None:
+            self.gcmd.respond_info("False detection, continuing search")
+            return False
+        dx = abs(position_data[0] - self._auto_first_uv[0])
+        dy = abs(position_data[1] - self._auto_first_uv[1])
+        if dx > 50 or dy > 50:
+            self.gcmd.respond_info(
+                f"Detection unstable ({dx:.0f},{dy:.0f}px drift), continuing search")
+            return False
+        self.gcmd.respond_info(f"Nozzle verified at UV {position_data}")
+        self._auto_first_uv = position_data
+        self._auto_first_xy = self.pm.get_gcode_position()[:2]
+        return True
+
+    def _do_scale_move(self, target_phase):
+        self._calc_scale_direction()
+        setattr(self, target_phase, 'scaling')
+        self.gcmd.respond_info(
+            f"Centering: scale move X{self._auto_scale_dx:.1f} Y{self._auto_scale_dy:.1f}")
+        self._with_slow_speed(
+            lambda: self.pm.moveRelative(
+                X=self._auto_scale_dx, Y=self._auto_scale_dy))
+        self._schedule_detect()
+
+    def _calib_search(self, position_data):
+        if position_data is None:
+            self._search_next_calibration_point()
+            return
+        self._calib_phase = 'verifying'
+        self._start_verify(position_data)
+
+    def _calib_verify(self, position_data):
+        if self._check_verification(position_data):
+            self._do_scale_move('_calib_phase')
+        else:
+            self._calib_phase = 'searching'
+            self._search_next_calibration_point()
+
+    def _calib_scaling(self, position_data):
+        if position_data is None:
+            self._handle_operation_failure("Nozzle lost after scaling move")
+            return
+        mpp = self._calc_signed_mpp(position_data)
+        if mpp is None:
+            self._handle_operation_failure("Pixel displacement too small for scale")
+            return
+        self._calib_mpp_x, self._calib_mpp_y = mpp
+        self._calib_center_retries = 0
+        self._calib_phase = 'centering'
+        self.gcmd.respond_info(
+            f"Scale: X{self._calib_mpp_x:.4f} Y{self._calib_mpp_y:.4f} mm/pixel")
+        self._calib_centering(position_data)
+
+    def _calib_centering(self, nozzle_uv):
+        def on_centered(uv):
+            self.camera_calibration.start_xy = self.pm.get_gcode_position()[:2]
+            self.camera_calibration.start_uv = uv
+            self.camera_calibration.initial_position_received = True
+            self._calib_phase = 'calibrating'
+            self._save_camera_offset_vars()
+            self.gcmd.respond_info("Nozzle centered, starting calibration moves")
+            self._move_to_calibration_point(0)
+        self._do_centering_step(
+            nozzle_uv,
+            '_calib_mpp_x', '_calib_mpp_y',
+            '_prev_dx_pixel', '_prev_dy_pixel',
+            10, '_calib_center_retries',
+            on_centered)
+
+    def _calib_process_point(self, position_data):
         current_index = self.camera_calibration.current_index
         if current_index >= len(self.camera_calibration.points):
             return
@@ -332,7 +427,7 @@ class Ktamv:
                     (dx_cam, dy_cam),
                     mpp
                 )
-                self.gcode.respond_info(
+                self.gcmd.respond_info(
                     f"MM per pixel for step {current_index + 1} of {len(self.camera_calibration.points)} is {mpp:.6f}"
                 )
 
@@ -368,6 +463,249 @@ class Ktamv:
         else:
             gcmd.respond_info(f"Did not find nozzle after {runtime:.2f} seconds!")
 
+    def _generate_search_pattern(self, step, max_rx, max_ry):
+        points = [(0.0, 0.0)]
+        n = 1
+        while n * step <= max(max_rx, max_ry):
+            rx = min(n * step, max_rx)
+            ry = min(n * step, max_ry)
+            if rx <= 0 and ry <= 0:
+                break
+            rx = round(rx, 2)
+            ry = round(ry, 2)
+            # Top side: left to right
+            x = -rx
+            while x <= rx + 0.001:
+                points.append((round(x, 2), round(-ry, 2)))
+                x += step
+            # Right side: top+step to bottom
+            y = -ry + step
+            while y <= ry + 0.001:
+                points.append((round(rx, 2), round(y, 2)))
+                y += step
+            # Bottom side: right-step to left
+            x = rx - step
+            while x >= -rx - 0.001:
+                points.append((round(x, 2), round(ry, 2)))
+                x -= step
+            # Left side: bottom-step to top+step
+            y = ry - step
+            while y >= -ry + step - 0.001:
+                points.append((round(-rx, 2), round(y, 2)))
+                y -= step
+            n += 1
+        return points
+
+    def _clamp_search_ry(self, center_xy):
+        curtime = self.printer.get_reactor().monotonic()
+        toolhead = self.printer.lookup_object("toolhead")
+        kin_status = toolhead.get_kinematics().get_status(curtime)
+        y_min = float(kin_status['axis_minimum'].y)
+        y_max = float(kin_status['axis_maximum'].y)
+        return min(self.search_radius_y,
+                   max(min(center_xy[1] - y_min, y_max - center_xy[1]), 0.0))
+
+    def _init_search(self):
+        center_xy = self.pm.get_gcode_position()[:2]
+        max_ry = self._clamp_search_ry(center_xy)
+        self._search_points = self._generate_search_pattern(
+            self.search_step, self.search_radius_x, max_ry)
+        self._search_index = 0
+        self._search_center = center_xy
+        return center_xy, max_ry
+
+    def _search_next_point(self, phase_name):
+        self._search_index += 1
+        if self._search_index >= len(self._search_points):
+            self._handle_operation_failure(
+                "Nozzle not found within search area.")
+            return
+        dx, dy = self._search_points[self._search_index]
+        self.gcmd.respond_info(
+            f"Searching {self._search_index + 1}/{len(self._search_points)}"
+            f" offset X{dx:.1f} Y{dy:.1f}")
+        self._move_to_search_point(phase_name)
+
+    def _move_to_search_point(self, phase_name):
+        dx, dy = self._search_points[self._search_index]
+        target_x = self._search_center[0] + dx
+        target_y = self._search_center[1] + dy
+        self._with_slow_speed(lambda: self.pm.moveAbsolute(
+            X=target_x, Y=target_y))
+        self._schedule_detect()
+
+    def _schedule_detect(self):
+        self.reactor.register_callback(
+            lambda e: self._call_remote_method("get_nozzle_position"),
+            self.reactor.monotonic() + 0.3)
+
+    def _with_slow_speed(self, fn):
+        original_speed = self.pm.speed
+        try:
+            self.pm.speed = 500
+            fn()
+        finally:
+            self.pm.speed = original_speed
+
+    def _calc_scale_direction(self):
+        scale_step = min(self.search_step, 1.0)
+        if self._search_index > 0:
+            prev = self._search_points[self._search_index - 1]
+            curr = self._search_points[self._search_index]
+            last_dx = curr[0] - prev[0]
+            last_dy = curr[1] - prev[1]
+        else:
+            last_dx = self.search_step
+            last_dy = 0.0
+        if abs(last_dx) >= abs(last_dy):
+            self._auto_scale_dx = scale_step if last_dx >= 0 else -scale_step
+            self._auto_scale_dy = 0.0
+        else:
+            self._auto_scale_dx = 0.0
+            self._auto_scale_dy = scale_step if last_dy >= 0 else -scale_step
+
+    def _calc_signed_mpp(self, position_data):
+        second_xy = self.pm.get_gcode_position()[:2]
+        dx_space = second_xy[0] - self._auto_first_xy[0]
+        dy_space = second_xy[1] - self._auto_first_xy[1]
+        dx_pixel = position_data[0] - self._auto_first_uv[0]
+        dy_pixel = position_data[1] - self._auto_first_uv[1]
+        if abs(self._auto_scale_dx) > 0 and abs(dx_pixel) >= 1:
+            signed_mpp = dx_space / dx_pixel
+        elif abs(self._auto_scale_dy) > 0 and abs(dy_pixel) >= 1:
+            signed_mpp = dy_space / dy_pixel
+        else:
+            return None
+        if abs(signed_mpp) < 0.001:
+            return None
+        mpp_abs = abs(signed_mpp)
+        if abs(self._auto_scale_dx) > 0:
+            return (signed_mpp, mpp_abs)
+        else:
+            return (mpp_abs, signed_mpp)
+
+    def _do_centering_step(self, nozzle_uv, mpp_x_attr, mpp_y_attr,
+                           prev_dx_attr, prev_dy_attr, max_iters,
+                           iter_attr, on_centered, threshold=5):
+        if nozzle_uv is None:
+            self._handle_operation_failure("Nozzle lost during centering")
+            return False
+        dx_pixel = FRAME_WIDTH / 2.0 - nozzle_uv[0]
+        dy_pixel = FRAME_HEIGHT / 2.0 - nozzle_uv[1]
+        mpp_x = getattr(self, mpp_x_attr)
+        mpp_y = getattr(self, mpp_y_attr)
+        prev_dx = getattr(self, prev_dx_attr, None)
+        if prev_dx is not None:
+            if abs(dx_pixel) > abs(prev_dx) + 3:
+                mpp_x = -mpp_x
+                setattr(self, mpp_x_attr, mpp_x)
+                self.gcmd.respond_info("Flipped X direction sign")
+            prev_dy = getattr(self, prev_dy_attr)
+            if abs(dy_pixel) > abs(prev_dy) + 3:
+                mpp_y = -mpp_y
+                setattr(self, mpp_y_attr, mpp_y)
+                self.gcmd.respond_info("Flipped Y direction sign")
+        setattr(self, prev_dx_attr, dx_pixel)
+        setattr(self, prev_dy_attr, dy_pixel)
+        if abs(dx_pixel) < threshold and abs(dy_pixel) < threshold:
+            on_centered(nozzle_uv)
+            return True
+        gain = self.gain
+        if iter_attr:
+            gain = max(self.gain - getattr(self, iter_attr) * 0.02, 0.3)
+        dx_mm = round(dx_pixel * mpp_x * gain, 3)
+        dy_mm = round(dy_pixel * mpp_y * gain, 3)
+        self.gcmd.respond_info(
+            f"Centering: UV {nozzle_uv} -> move X{dx_mm:.3f} Y{dy_mm:.3f}")
+        self._with_slow_speed(lambda: self.pm.moveRelative(X=dx_mm, Y=dy_mm))
+        if iter_attr:
+            iters = getattr(self, iter_attr) + 1
+            setattr(self, iter_attr, iters)
+            if iters >= max_iters:
+                on_centered(nozzle_uv)
+                return True
+        self._schedule_detect()
+        return False
+
+    def _process_auto_camera_center(self, result):
+        position_data = result.get("position")
+        phase = getattr(self, '_auto_phase', 'searching')
+
+        if phase == 'searching':
+            self._auto_center_search(position_data)
+        elif phase == 'verifying':
+            self._auto_center_verify(position_data)
+        elif phase == 'scaling':
+            self._auto_center_scaling(position_data)
+        elif phase == 'centering':
+            self._auto_center_iterate(position_data)
+
+    def _auto_center_search(self, position_data):
+        if position_data is not None:
+            self._auto_phase = 'verifying'
+            self._start_verify(position_data)
+            return
+        self._search_next_point('searching')
+
+    def _auto_center_verify(self, position_data):
+        if self._check_verification(position_data):
+            self._do_scale_move('_auto_phase')
+        else:
+            self._auto_phase = 'searching'
+            self._search_next_point('searching')
+
+    def _auto_center_scaling(self, position_data):
+        if position_data is None:
+            self._handle_operation_failure(
+                "Nozzle lost after scaling move, cannot calculate center offset")
+            return
+        mpp = self._calc_signed_mpp(position_data)
+        if mpp is None:
+            self._handle_operation_failure(
+                "Pixel displacement too small, cannot calculate scale")
+            return
+        self._auto_mpp_x, self._auto_mpp_y = mpp
+        self._auto_phase = 'centering'
+        self.operation_retries = 0
+        self.gcmd.respond_info(
+            f"Scale: X{self._auto_mpp_x:.4f} Y{self._auto_mpp_y:.4f} mm/pixel")
+        self._auto_center_iterate(position_data)
+
+    def _auto_center_iterate(self, nozzle_uv):
+        def on_centered(uv):
+            self._save_camera_center_offset()
+        self._do_centering_step(
+            nozzle_uv,
+            '_auto_mpp_x', '_auto_mpp_y',
+            '_auto_prev_dx_pixel', '_auto_prev_dy_pixel',
+            self.max_retries, 'operation_retries',
+            on_centered, threshold=3)
+
+    def _save_camera_offset_vars(self):
+        current_pos = self.pm.get_raw_position()
+        x_offset = round(
+            float(current_pos[0]) - self.camera_center_points[0], 3)
+        y_offset = round(
+            float(current_pos[1]) - self.camera_center_points[1], 3)
+        z_offset = round(
+            float(current_pos[2]) - self.camera_center_points[2], 3)
+        for var_name, value in [
+            ("camera_x_offset_val", x_offset),
+            ("camera_y_offset_val", y_offset),
+            ("camera_z_offset_val", z_offset)
+        ]:
+            script = f'SAVE_VARIABLE VARIABLE={var_name} VALUE="{value}"'
+            self.gcode.run_script_from_command(script)
+        self.gcmd.respond_info(
+            f"Camera offset saved: X:{x_offset:.3f} Y:{y_offset:.3f}"
+            f" Z:{z_offset:.3f}")
+
+    def _save_camera_center_offset(self):
+        self._save_camera_offset_vars()
+        self.gcmd.respond_info("Auto camera center calibration complete!")
+        self.current_state = CalibrationState.IDLE
+        self._cleanup_operation()
+
     cmd_KTAMV_CALIB_NOZZLE_help = (
         "Calibrates the movement of the active nozzle"
         + " around the point it started at"
@@ -387,11 +725,25 @@ class Ktamv:
             self._handle_operation_failure(f"Nozzle calibration failed: {str(e)}")
 
     cmd_KTAMV_CALIB_CAMERA_help = (
-        "Calibrates the movement of the active camera"
-        + " around the point it started at")
+        "Automatically searches for the nozzle via rectangular spiral,"
+        + " centers it, and records the camera center offset")
     def cmd_KTAMV_CALIB_CAMERA(self, gcmd):
-        self.gcode.respond_info("Starting mm/px calibration")
-        self._start_camera_calibration(gcmd)
+        gcmd.respond_info("Starting automatic camera center calibration")
+        self.pm.ensureHomed()
+        self._switch_tool(0)
+        self._move_to_camera_center()
+
+        center_xy, max_ry = self._init_search()
+
+        self.current_state = CalibrationState.AUTO_CAMERA_CENTER
+        self._auto_phase = 'searching'
+        self.operation_retries = 0
+        self.gcmd = gcmd
+        gcmd.respond_info(
+            f"Search: {len(self._search_points)} points,"
+            f" step={self.search_step:.1f}mm,"
+            f" radius X{self.search_radius_x:.1f}/Y{max_ry:.1f}mm")
+        self._call_remote_method("get_nozzle_position")
 
     cmd_KTAMV_FIND_NOZZLE_CENTER_help = ("Finds the center of the nozzle and moves"
         + " it to the center of the camera, offset can be set from here")
@@ -535,7 +887,12 @@ class Ktamv:
                 state['step'] = CalibrationStep.MOVE_TO_CENTER_T1
 
             elif current_step == CalibrationStep.MOVE_TO_CENTER_T1:
-                self._move_to_camera_center()
+                if self.center_position:
+                    self.pm.moveAbsolute(
+                        X=self.center_position[0],
+                        Y=self.center_position[1])
+                else:
+                    self._move_to_camera_center()
                 state['step'] = CalibrationStep.START_T1_NOZZLE_CALIBRATION
 
             elif current_step == CalibrationStep.START_T1_NOZZLE_CALIBRATION:
@@ -570,12 +927,18 @@ class Ktamv:
             self.camera_calibration = CameraCalibrationSession()
             self.camera_calibration.start_xy = self.pm.get_gcode_position()[:2]
 
+            self._init_search()
+
             self.calibration_data.clear()
             self.current_state = CalibrationState.CAMERA_CALIBRATION
+            self._calib_phase = 'searching'
             self.gcmd = gcmd
-            self._call_remote_method("get_nozzle_position") 
+            self._call_remote_method("get_nozzle_position")
         except Exception as e:
             self._handle_operation_failure(f"Camera calibration failed: {str(e)}")
+
+    def _search_next_calibration_point(self):
+        self._search_next_point('_calib_phase')
 
     def _move_to_calibration_point(self, index):
         try:
@@ -584,13 +947,33 @@ class Ktamv:
                 return
 
             dx, dy = self.camera_calibration.points[index]
+
+            # Check axis bounds before moving
+            current_xy = self.pm.get_gcode_position()[:2]
+            target_x = current_xy[0] + dx
+            target_y = current_xy[1] + dy
+            curtime = self.printer.get_reactor().monotonic()
+            toolhead = self.printer.lookup_object("toolhead")
+            kin_status = toolhead.get_kinematics().get_status(curtime)
+            x_min = float(kin_status['axis_minimum'].x)
+            x_max = float(kin_status['axis_maximum'].x)
+            y_min = float(kin_status['axis_minimum'].y)
+            y_max = float(kin_status['axis_maximum'].y)
+            if (target_x < x_min or target_x > x_max
+                    or target_y < y_min or target_y > y_max):
+                self.gcmd.respond_info(
+                    f"Skipping calibration point {index + 1}"
+                    f" ({dx},{dy}) - out of bounds")
+                self.camera_calibration.current_index += 1
+                if self.camera_calibration.current_index < len(self.camera_calibration.points):
+                    self._move_to_calibration_point(
+                        self.camera_calibration.current_index)
+                else:
+                    self._finish_camera_calibration()
+                return
+
             logging.info(f"Moving to calibration point {index + 1}: relative move X{dx} Y{dy}")
-            original_speed = self.pm.speed
-            self.pm.speed = 500
-            try:
-                self.pm.moveRelative(X=dx, Y=dy)
-            finally:
-                self.pm.speed = original_speed
+            self._with_slow_speed(lambda: self.pm.moveRelative(X=dx, Y=dy))
 
             self.reactor.register_callback(
                 lambda e: self._call_remote_method("get_nozzle_position"),
@@ -686,12 +1069,8 @@ class Ktamv:
                     new_uv[1] > FRAME_HEIGHT or new_uv[1] < 0):
                     self._retry_camera_calibration("Calibration would move nozzle outside camera frame")
                     return
-                original_speed = self.pm.speed
-                try:
-                    self.pm.speed = 500
-                    self.pm.moveRelative(X=offsets[0], Y=offsets[1])
-                finally:
-                    self.pm.speed = original_speed
+                self._with_slow_speed(
+                    lambda: self.pm.moveRelative(X=offsets[0], Y=offsets[1]))
                 self.operation_retries += 1
                 if self.operation_retries >= self.max_retries:
                     self._retry_camera_calibration("Nozzle calibration reached maximum retries")
