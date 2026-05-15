@@ -138,6 +138,7 @@ class PrinterExtruder:
         self.name = config.get_name()
         self.err_count = 0
         self.last_position = 0.
+        self.extrude_factor = 1.
         # Setup hotend heater
         pheaters = self.printer.load_object(config, 'heaters')
         gcode_id = 'T%d' % (extruder_num,)
@@ -191,6 +192,7 @@ class PrinterExtruder:
     def get_status(self, eventtime):
         sts = self.heater.get_status(eventtime)
         sts['can_extrude'] = self.heater.can_extrude
+        sts['extrude_factor'] = self.extrude_factor
         if self.extruder_stepper is not None:
             sts.update(self.extruder_stepper.get_status(eventtime))
         return sts
