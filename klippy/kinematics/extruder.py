@@ -209,6 +209,9 @@ class PrinterExtruder:
         if not self.heater.can_extrude:
             msg = (f"Extrude below minimum extrude temp of {self.heater.min_extrude_temp}℃")
             if self.printer.is_printing():
+                if self.printer.is_paused():
+                    self.gcode._respond_error(msg)
+                    return
                 self.err_count += 1
                 if self.err_count > 100:
                     self.err_count = 0
