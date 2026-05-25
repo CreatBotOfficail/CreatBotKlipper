@@ -1202,7 +1202,7 @@ class ProbeEddy:
         # Note that the default is the default drive current
         drive_current: int = gcmd.get_int(
             "DRIVE_CURRENT",
-            self._sensor._default_drive_current,
+            self._sensor._drive_current,
             minval=0,
             maxval=31,
         )
@@ -1294,8 +1294,8 @@ class ProbeEddy:
                     result_msg = "Unknown state?"
                 break
 
-            # increase DC and keep going
-            drive_current += 1
+            # decrease DC and keep going
+            drive_current -= 1
 
         if state == DONE:
             self._log_msg(result_msg)
