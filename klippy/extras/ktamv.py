@@ -14,6 +14,11 @@ class KtamvPm:
         self.gcode = self.printer.lookup_object("gcode")
         self.toolhead = self.printer.lookup_object("toolhead")
 
+        xconfig = config.getsection('stepper_x')
+        yconfig = config.getsection('stepper_y')
+        self._x_range = (xconfig.getfloat('position_min'), xconfig.getfloat('position_max'))
+        self._y_range = (yconfig.getfloat('position_min'), yconfig.getfloat('position_max'))
+
     def ensureHomed(self, home=True) -> bool:
         curtime = self.printer.get_reactor().monotonic()
         toolhead = self.printer.lookup_object("toolhead")
@@ -58,23 +63,24 @@ class KtamvPm:
             logging.error(f"Error in moveRelative: {str(e)}")
             raise self.gcode.error(f"moveRelative failed: {str(e)}")
 
-    def moveRelativeToArray(self, pos_array, protected=False):
-        self.moveRelative(
-            pos_array[0], pos_array[1], pos_array[2], protected
-        )
-
-    def complexMoveRelative(self, X=0, Y=0, Z=0):
-        self.moveRelative(X, Y, Z, True)
-
     def moveAbsoluteToArray(self, pos_array):
-        gcode = "G90\nG1 "
+        clamped_pos = []
         for i in range(len(pos_array)):
             if i == 0:
-                gcode += "X%s " % (pos_array[i])
+                clamped_pos.append(max(self._x_range[0], min(pos_array[i], self._x_range[1])))
             elif i == 1:
-                gcode += "Y%s " % (pos_array[i])
+                clamped_pos.append(max(self._y_range[0], min(pos_array[i], self._y_range[1])))
+            else:
+                clamped_pos.append(pos_array[i])
+        
+        gcode = "G90\nG1 "
+        for i in range(len(clamped_pos)):
+            if i == 0:
+                gcode += "X%s " % (clamped_pos[i])
+            elif i == 1:
+                gcode += "Y%s " % (clamped_pos[i])
             elif i == 2:
-                gcode += "Z%s " % (pos_array[i])
+                gcode += "Z%s " % (clamped_pos[i])
         gcode += "F%s " % (self.speed)
 
         self.gcode.run_script_from_command(gcode)
