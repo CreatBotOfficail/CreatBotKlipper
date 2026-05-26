@@ -20,6 +20,11 @@ class NozzleCleaner:
         self.run_x_min, self.run_x_max = self.clean_x_min, self.clean_x_max
         self.run_y_min, self.run_y_max = self.clean_y_min, self.clean_y_max
 
+        xconfig = config.getsection('stepper_x')
+        yconfig = config.getsection('stepper_y')
+        self._x_range = (xconfig.getfloat('position_min'), xconfig.getfloat('position_max'))
+        self._y_range = (yconfig.getfloat('position_min'), yconfig.getfloat('position_max'))
+
         self.clean_z_height = config.getfloat('clean_z_height', 2.0)
         self.clean_retract = config.getfloat('clean_retract', 10.0)
         self.retract_z_height = config.getfloat('retract_z_height', 20.0)
@@ -135,10 +140,16 @@ class NozzleCleaner:
             for i in index:
                 self.gcode.run_script_from_command(f' M109 T{i} S{temp}')
 
+    def _check_move_position(self, x, y):
+        x = max(self._x_range[0], min(x, self._x_range[1]))
+        y = max(self._y_range[0], min(y, self._y_range[1]))
+        return x, y
+
     def _move_to_clean_position(self):
+        x_coord, y_coord = self._check_move_position(self.run_x_min, self.run_y_max)
         script = f'G90\n'
         script += f'G0 Z{self.retract_z_height} F{self.move_speed}\n'
-        script += f'G0 X{self.run_x_min} Y{self.run_y_max} F{self.move_speed}\n'
+        script += f'G0 X{x_coord} Y{y_coord} F{self.move_speed}\n'
         script += f'G0 Z{self.clean_z_height} F{self.clean_speed}'
         self.gcode.run_script_from_command(script)
         self.toolhead.wait_moves()
@@ -153,20 +164,31 @@ class NozzleCleaner:
                 if current_y < self.run_y_min or current_y > self.run_y_max:
                     current_step = -current_step
                     current_y += 2 * current_step
+                x_coord = self.run_x_max if i % 2 == 0 else self.run_x_min
+                original_x, original_y = x_coord, current_y
+                x_coord, current_y = self._check_move_position(x_coord, current_y)
+                if x_coord != original_x or current_y != original_y:
+                    break
                 if i % 2 == 0:
-                    gcode_commands.append(f'G1 X{self.run_x_max} Y{current_y} F{self.clean_speed}')
+                    gcode_commands.append(f'G1 X{x_coord} Y{current_y} F{self.clean_speed}')
                 else:
-                    gcode_commands.append(f'G1 X{self.run_x_min} Y{current_y} F{self.clean_speed}')
-            gcode_commands.append(f'G0 X{self.run_x_min} Y{self.run_y_max} F{self.move_speed}')
+                    gcode_commands.append(f'G1 X{x_coord} Y{current_y} F{self.clean_speed}')
+            x_coord, y_coord = self._check_move_position(self.run_x_min, self.run_y_max)
+            gcode_commands.append(f'G0 X{x_coord} Y{y_coord} F{self.move_speed}')
             current_x = self.run_x_min
             for i in range(self.nozzle_loop_y):
                 current_x += self.x_step
                 if current_x > self.run_x_max:
                     break
+                y_coord = self.run_y_min if i % 2 == 0 else self.run_y_max
+                original_x, original_y = current_x, y_coord
+                current_x, y_coord = self._check_move_position(current_x, y_coord)
+                if current_x != original_x or y_coord != original_y:
+                    break
                 if i % 2 == 0:
-                    gcode_commands.append(f'G1 X{current_x} Y{self.run_y_min} F{self.clean_speed}')
+                    gcode_commands.append(f'G1 X{current_x} Y{y_coord} F{self.clean_speed}')
                 else:
-                    gcode_commands.append(f'G1 X{current_x} Y{self.run_y_max} F{self.clean_speed}')
+                    gcode_commands.append(f'G1 X{current_x} Y{y_coord} F{self.clean_speed}')
         self.gcode.run_script_from_command('\n'.join(gcode_commands))
         self.toolhead.wait_moves()
 
