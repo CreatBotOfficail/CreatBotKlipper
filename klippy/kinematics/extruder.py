@@ -211,7 +211,7 @@ class PrinterExtruder:
             if self.printer.is_printing():
                 if self.printer.is_paused():
                     self.gcode._respond_error(msg)
-                    return
+                    return msg
                 self.err_count += 1
                 if self.err_count > 100:
                     self.err_count = 0

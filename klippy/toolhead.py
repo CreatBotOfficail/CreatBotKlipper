@@ -486,7 +486,9 @@ class ToolHead:
         if move.is_kinematic_move:
             self.kin.check_move(move)
         if move.axes_d[3]:
-            self.extruder.check_move(move)
+            msg = self.extruder.check_move(move)
+            if msg is not None and "below minimum extrude temp" in msg:
+                return
         self.commanded_pos[:] = move.end_pos
         self.lookahead.add_move(move)
         if self.print_time > self.need_check_pause:
