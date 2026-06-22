@@ -518,6 +518,7 @@ def run_single_probe(probe, gcmd):
 class ProbeEndstopWrapper:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.reactor = self.printer.get_reactor()
         self.position_endstop = config.getfloat('z_offset')
         self.stow_on_each_sample = config.getboolean(
             'deactivate_on_each_sample', True)
@@ -529,6 +530,14 @@ class ProbeEndstopWrapper:
         # Create an "endstop" object to handle the probe pin
         ppins = self.printer.lookup_object('pins')
         self.mcu_endstop = ppins.setup_pin('endstop', config.get('pin'))
+        self.endstop_state = True
+        self.endstop_pin = config.get('endstop_pin', None)
+        self.endstop_check_delay = config.getfloat(
+            'debounce_delay', 0., minval=0.) + .020
+        if self.endstop_pin is not None:
+            buttons = self.printer.load_object(config, 'buttons')
+            buttons.register_debounce_button(
+                self.endstop_pin, self._button_callback, config)
         # Wrappers
         self.get_mcu = self.mcu_endstop.get_mcu
         self.add_stepper = self.mcu_endstop.add_stepper
@@ -539,6 +548,9 @@ class ProbeEndstopWrapper:
         self.probe_session = None
         # multi probes state
         self.multi = 'OFF'
+
+    def _button_callback(self, eventtime, state):
+        self.endstop_state = state
     def _raise_probe(self):
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
@@ -550,9 +562,15 @@ class ProbeEndstopWrapper:
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
         self.activate_gcode.run_gcode_from_command()
+        if self.endstop_pin is not None:
+            self.reactor.pause(
+                self.reactor.monotonic() + self.endstop_check_delay)
         if toolhead.get_position()[:3] != start_pos[:3]:
             raise self.printer.command_error(
                 "Toolhead moved during probe activate_gcode script")
+        if self.endstop_pin is not None and self.endstop_state:
+            self.deactivate_gcode.run_gcode_from_command()
+            raise self.printer.command_error("Detected Abnormal servo opening, aborting probing")
     def multi_probe_begin(self):
         if self.stow_on_each_sample:
             return
