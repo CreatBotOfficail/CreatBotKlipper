@@ -534,6 +534,8 @@ class ProbeEndstopWrapper:
         self.endstop_pin = config.get('endstop_pin', None)
         self.endstop_check_delay = config.getfloat(
             'debounce_delay', 0., minval=0.) + .020
+        self.endstop_check_timeout = config.getfloat(
+            'endstop_check_timeout', 2.00, minval=0.)
         if self.endstop_pin is not None:
             buttons = self.printer.load_object(config, 'buttons')
             buttons.register_debounce_button(
@@ -551,6 +553,14 @@ class ProbeEndstopWrapper:
 
     def _button_callback(self, eventtime, state):
         self.endstop_state = state
+    def _wait_for_button_state(self, state):
+        if self.endstop_pin is None:
+            return
+        eventtime = self.reactor.pause(
+            self.reactor.monotonic() + self.endstop_check_delay)
+        endtime = eventtime + self.endstop_check_timeout
+        while self.endstop_state != state and eventtime < endtime:
+            eventtime = self.reactor.pause(eventtime + .010)
     def _raise_probe(self):
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
@@ -562,9 +572,7 @@ class ProbeEndstopWrapper:
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
         self.activate_gcode.run_gcode_from_command()
-        if self.endstop_pin is not None:
-            self.reactor.pause(
-                self.reactor.monotonic() + self.endstop_check_delay)
+        self._wait_for_button_state(False)
         if toolhead.get_position()[:3] != start_pos[:3]:
             raise self.printer.command_error(
                 "Toolhead moved during probe activate_gcode script")
@@ -579,7 +587,8 @@ class ProbeEndstopWrapper:
         if self.stow_on_each_sample:
             return
         toolhead = self.printer.lookup_object('toolhead')
-        toolhead.manual_move([None, None, toolhead.get_position()[2]+2.0], self.probe_session.lift_speed)
+        if 'z' in toolhead.reliable_axes:
+            toolhead.manual_move([None, None, toolhead.get_position()[2]+2.0], self.probe_session.lift_speed)
         self._raise_probe()
         self.multi = 'OFF'
     def probing_move(self, pos, speed):
