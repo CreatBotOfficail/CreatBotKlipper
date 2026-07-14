@@ -355,7 +355,7 @@ class ToolHead:
                     move.axes_r[0], move.axes_r[1], move.axes_r[2],
                     move.start_v, move.cruise_v, move.accel, move.taskline)
             if move.axes_d[3]:
-                self.extruder.move(next_move_time, move)
+                self.extruder.move(next_move_time, move, move.taskline)
             next_move_time = (next_move_time + move.accel_t
                               + move.cruise_t + move.decel_t)
             for cb in move.timing_callbacks:
