@@ -138,6 +138,7 @@ class VirtualSD:
         self.work_timer = self.reactor.register_timer(
             self.work_handler, self.reactor.NOW)
     def do_cancel(self):
+        self.gcode.request_cancel()
         if self.current_file is not None:
             self.do_pause()
             self.current_file.close()

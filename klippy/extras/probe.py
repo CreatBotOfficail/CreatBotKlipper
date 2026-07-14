@@ -564,7 +564,7 @@ class ProbeEndstopWrapper:
     def _raise_probe(self):
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
-        self.deactivate_gcode.run_gcode_from_command()
+        self.deactivate_gcode.run_gcode_from_command(allow_on_cancel=True)
         if toolhead.get_position()[:3] != start_pos[:3]:
             raise self.printer.command_error(
                 "Toolhead moved during probe deactivate_gcode script")
@@ -577,7 +577,7 @@ class ProbeEndstopWrapper:
             raise self.printer.command_error(
                 "Toolhead moved during probe activate_gcode script")
         if self.endstop_pin is not None and self.endstop_state:
-            self.deactivate_gcode.run_gcode_from_command()
+            self.deactivate_gcode.run_gcode_from_command(allow_on_cancel=True)
             raise self.printer.command_error("Detected Abnormal servo opening, aborting probing")
     def multi_probe_begin(self):
         if self.stow_on_each_sample:

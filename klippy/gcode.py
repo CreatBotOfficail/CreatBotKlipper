@@ -107,6 +107,9 @@ class GCodeDispatch:
         self.mux_commands = {}
         self.gcode_help = {}
         self.status_commands = {}
+        self.cancel_requested = False
+        self.cancel_processing_depth = 0
+        self.cancel_allow_depth = 0
         # Register commands needed before config file is loaded
         handlers = ['M110', 'M112', 'M115',
                     'RESTART', 'FIRMWARE_RESTART', 'ECHO', 'STATUS', 'HELP']
@@ -173,6 +176,23 @@ class GCodeDispatch:
             if cmd in commands:
                 commands[cmd]['help'] = self.gcode_help[cmd]
         self.status_commands = commands
+    def request_cancel(self):
+        self.cancel_requested = True
+        pheaters = self.printer.lookup_object('heaters', None)
+        if pheaters is not None:
+            pheaters.cancel_temperature_wait()
+    def clear_cancel(self):
+        self.cancel_requested = False
+    def is_cancel_requested(self):
+        return self.cancel_requested
+    def _is_cancel_command(self, cmd):
+        return cmd in ('CANCEL_PRINT', 'CANCEL_PRINT_BASE')
+    def _should_skip_on_cancel(self, cmd):
+        if not self.cancel_requested or self.cancel_processing_depth:
+            return False
+        if self.cancel_allow_depth or self._is_cancel_command(cmd):
+            return False
+        return True
     def register_output_handler(self, cb):
         self.output_callbacks.append(cb)
     def _handle_shutdown(self):
@@ -216,7 +236,12 @@ class GCodeDispatch:
             gcmd = GCodeCommand(self, cmd, origline, params, need_ack, taskline)
             # Invoke handler for command
             handler = self.gcode_handlers.get(cmd, self.cmd_default)
+            is_cancel_command = self._is_cancel_command(cmd)
+            if self._should_skip_on_cancel(cmd):
+                continue
             try:
+                if is_cancel_command:
+                    self.cancel_processing_depth += 1
                 handler(gcmd)
             except self.error as e:
                 self._respond_error(str(e))
@@ -230,9 +255,23 @@ class GCodeDispatch:
                 self._respond_error(msg)
                 if not need_ack:
                     raise
+            finally:
+                if is_cancel_command:
+                    self.cancel_processing_depth -= 1
+                    if self.cancel_processing_depth <= 0:
+                        self.cancel_processing_depth = 0
+                        self.clear_cancel()
             gcmd.ack()
-    def run_script_from_command(self, script):
-        self._process_commands(script.split('\n'), need_ack=False)
+    def run_script_from_command(self, script, allow_on_cancel=False):
+        if allow_on_cancel:
+            self.cancel_allow_depth += 1
+        try:
+            self._process_commands(script.split('\n'), need_ack=False)
+        finally:
+            if allow_on_cancel:
+                self.cancel_allow_depth -= 1
+                if self.cancel_allow_depth < 0:
+                    self.cancel_allow_depth = 0
     def run_script(self, script):
         with self.mutex:
             self._process_commands(script.split('\n'), need_ack=False)
@@ -396,6 +435,25 @@ class GCodeIO:
         self.pending_commands = []
         self.bytes_read = 0
         self.input_log = collections.deque([], 50)
+    def _request_cancel(self):
+        self.gcode.request_cancel()
+    def _has_cancel_print(self, lines):
+        for line in lines:
+            line = line.strip()
+            cpos = line.find(';')
+            if cpos >= 0:
+                line = line[:cpos].strip()
+            end = line.rfind('*')
+            if end >= 0 and line[end+1:].isdigit():
+                line = line[:end].strip()
+            line = line.upper()
+            if line.startswith('N'):
+                parts = line.split(None, 1)
+                if len(parts) == 2 and parts[0][1:].isdigit():
+                    line = parts[1].lstrip()
+            if line == 'CANCEL_PRINT' or line.startswith('CANCEL_PRINT '):
+                return True
+        return False
     def _handle_ready(self):
         self.is_printer_ready = True
         if self.is_fileinput and self.fd_handle is None:
@@ -429,6 +487,8 @@ class GCodeIO:
         self.partial_input = lines.pop()
         pending_commands = self.pending_commands
         pending_commands.extend(lines)
+        if self._has_cancel_print(lines):
+            self._request_cancel()
         self.pipe_is_active = True
         # Special handling for debug file input EOF
         if not data and self.is_fileinput:

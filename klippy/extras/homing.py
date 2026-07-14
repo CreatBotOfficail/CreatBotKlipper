@@ -72,6 +72,30 @@ class HomingMove:
             kin_spos[sname] += offsets.get(sname, 0) * stepper.get_step_dist()
         thpos = self.toolhead.get_position()
         return list(kin.calc_position(kin_spos))[:3] + thpos[3:]
+    def _is_cancel_requested(self):
+        gcode = self.printer.lookup_object('gcode', None)
+        if gcode is None or not hasattr(gcode, 'is_cancel_requested'):
+            return False
+        return gcode.is_cancel_requested()
+    def _add_cancel_completion(self, move_completion):
+        gcode = self.printer.lookup_object('gcode', None)
+        if gcode is None or not hasattr(gcode, 'is_cancel_requested'):
+            return move_completion
+        reactor = self.printer.get_reactor()
+        cancel_completion = reactor.completion()
+        def check_cancel(eventtime):
+            if gcode.is_cancel_requested():
+                cancel_completion.complete(1)
+                return reactor.NEVER
+            return eventtime + .010
+        cancel_timer = reactor.register_timer(check_cancel, reactor.NOW)
+        def complete_when_move_done(eventtime):
+            move_completion.wait()
+            reactor.unregister_timer(cancel_timer)
+            if not cancel_completion.test():
+                cancel_completion.complete(0)
+        reactor.register_callback(complete_when_move_done)
+        return multi_complete(self.printer, [move_completion, cancel_completion])
     def homing_move(self, movepos, speed, probe_pos=False,
                     triggered=True, check_triggered=True):
         # Notify start of homing/probing move
@@ -94,6 +118,7 @@ class HomingMove:
                                           triggered=triggered)
             endstop_triggers.append(wait)
         all_endstop_trigger = multi_complete(self.printer, endstop_triggers)
+        all_endstop_trigger = self._add_cancel_completion(all_endstop_trigger)
         self.toolhead.dwell(HOMING_START_DELAY)
         # Issue move
         error = None
@@ -101,6 +126,8 @@ class HomingMove:
             self.toolhead.drip_move(movepos, speed, all_endstop_trigger)
         except self.printer.command_error as e:
             error = "Error during homing move: %s" % (str(e),)
+        if self._is_cancel_requested() and error is None:
+            error = "Homing cancelled"
         # Wait for endstops to trigger
         trigger_times = {}
         move_end_print_time = self.toolhead.get_last_move_time()

@@ -70,8 +70,9 @@ class TemplateWrapper:
                 self.name, traceback.format_exception_only(type(e), e)[-1])
             logging.exception(msg)
             raise self.gcode.error(msg)
-    def run_gcode_from_command(self, context=None):
-        self.gcode.run_script_from_command(self.render(context))
+    def run_gcode_from_command(self, context=None, allow_on_cancel=False):
+        self.gcode.run_script_from_command(
+            self.render(context), allow_on_cancel=allow_on_cancel)
 
 # Main gcode macro template tracking
 class PrinterGCodeMacro:

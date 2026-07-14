@@ -318,6 +318,15 @@ class PrinterHeaters:
             if heater.name == 'heater_filament_chamber':
                 continue
             heater.set_temp(0.)
+    def cancel_temperature_wait(self):
+        for heater in self.heaters.values():
+            heater.is_waiting = False
+        for sensor_name in self.available_sensors:
+            if sensor_name in self.heaters:
+                continue
+            sensor = self.printer.lookup_object(sensor_name, None)
+            if sensor is not None and getattr(sensor, 'is_waiting', False):
+                sensor.is_waiting = False
     cmd_TURN_OFF_HEATERS_help = "Turn off all heaters"
     def cmd_TURN_OFF_HEATERS(self, gcmd):
         self.turn_off_all_heaters()
