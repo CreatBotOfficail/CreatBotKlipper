@@ -368,6 +368,7 @@ class ProbeSessionHelper:
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
         self.results.append(epos)
+        return epos
     def pull_probed_results(self):
         res = self.results
         self.results = []
@@ -409,6 +410,7 @@ class ProbePointsHelper:
         self.lift_speed = self.speed
         self.probe_offsets = (0., 0., 0.)
         self.manual_results = []
+        self.probe_progress_callback = None
     def minimum_points(self,n):
         if len(self.probe_points) < n:
             raise self.printer.config_error(
@@ -420,6 +422,12 @@ class ProbePointsHelper:
         self.use_offsets = use_offsets
     def get_lift_speed(self):
         return self.lift_speed
+    def set_probe_progress_callback(self, callback):
+        self.probe_progress_callback = callback
+    def _report_probe_progress(self, probe_num, result=None):
+        if self.probe_progress_callback is not None:
+            self.probe_progress_callback(
+                probe_num, len(self.probe_points), result)
     def _move(self, coord, speed):
         self.printer.lookup_object('toolhead').manual_move(coord, speed)
     def _raise_tool(self, is_first=False):
@@ -480,8 +488,9 @@ class ProbePointsHelper:
                 # Caller wants a "retry" - restart probing
                 probe_num = 0
             self._move_next(probe_num)
-            probe_session.run_probe(gcmd)
+            result = probe_session.run_probe(gcmd)
             probe_num += 1
+            self._report_probe_progress(probe_num, result)
         probe_session.end_probe_session()
     def _manual_probe_start(self):
         self._raise_tool(not self.manual_results)
@@ -499,6 +508,7 @@ class ProbePointsHelper:
         if kin_pos is None:
             return
         self.manual_results.append(kin_pos)
+        self._report_probe_progress(len(self.manual_results), kin_pos)
         self._manual_probe_start()
 
 # Helper to obtain a single probe measurement
