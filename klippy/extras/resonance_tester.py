@@ -4,7 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, os, time
-from . import shaper_calibrate
+from . import operation_progress, shaper_calibrate
 
 class TestAxis:
     def __init__(self, axis=None, vib_dir=None):
@@ -124,7 +124,7 @@ class ResonanceTestExecutor:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
-    def run_test(self, test_seq, axis, gcmd):
+    def run_test(self, test_seq, axis, gcmd, progress_callback=None):
         reactor = self.printer.get_reactor()
         toolhead = self.printer.lookup_object('toolhead')
         X, Y, Z, E = toolhead.get_position()
@@ -172,6 +172,8 @@ class ResonanceTestExecutor:
                 toolhead.move([nX, nY, Z, E], max(abs_v, abs_last_v))
             if math.floor(freq) > math.floor(last_freq):
                 gcmd.respond_info("Testing frequency %.0f Hz" % (freq,))
+                if progress_callback is not None:
+                    progress_callback(int(math.floor(freq)))
                 reactor.pause(reactor.monotonic() + 0.01)
             X, Y = nX, nY
             last_t = next_t
@@ -229,7 +231,7 @@ class ResonanceTester:
                 for chip_axis, chip_name in self.accel_chip_names]
 
     def _run_test(self, gcmd, axes, helper, raw_name_suffix=None,
-                  accel_chips=None, test_point=None):
+                  accel_chips=None, test_point=None, progress_callback=None):
         toolhead = self.printer.lookup_object('toolhead')
         calibration_data = {axis: None for axis in axes}
 
@@ -242,7 +244,7 @@ class ResonanceTester:
             if len(test_points) > 1 or test_point is not None:
                 gcmd.respond_info(
                         "Probing point (%.3f, %.3f, %.3f)" % tuple(point))
-            for axis in axes:
+            for axis_index, axis in enumerate(axes, start=1):
                 toolhead.wait_moves()
                 toolhead.dwell(0.500)
                 if len(axes) > 1:
@@ -261,7 +263,12 @@ class ResonanceTester:
 
                 # Generate moves
                 test_seq = self.generator.gen_test()
-                self.executor.run_test(test_seq, axis, gcmd)
+                self.executor.run_test(
+                    test_seq, axis, gcmd,
+                    (lambda frequency, axis=axis, axis_index=axis_index:
+                     progress_callback(
+                         axis_index, len(axes), axis, frequency))
+                    if progress_callback is not None else None)
                 for chip_axis, aclient, chip_name in raw_values:
                     aclient.finish_measurements()
                     if raw_name_suffix is not None:
@@ -369,41 +376,67 @@ class ResonanceTester:
         # Setup shaper calibration
         helper = shaper_calibrate.ShaperCalibrate(self.printer)
 
-        calibration_data = self._run_test(gcmd, calibrate_axes, helper,
-                                          accel_chips=accel_chips)
+        def report_progress(step, total, test_axis, frequency):
+            operation_progress.respond(
+                self.gcode, 'update', id='shaper_calibrate',
+                type='input_shaper', step=step, total=total, phase='sweeping',
+                axis=test_axis.get_name(), frequency=frequency)
 
-        configfile = self.printer.lookup_object('configfile')
-        for axis in calibrate_axes:
-            axis_name = axis.get_name()
+        operation_progress.respond(
+            self.gcode, 'begin', id='shaper_calibrate',
+            type='input_shaper', step=0, total=len(calibrate_axes),
+            phase='preparing')
+
+        try:
+            calibration_data = self._run_test(gcmd, calibrate_axes, helper,
+                                              accel_chips=accel_chips,
+                                              progress_callback=report_progress)
+
+            configfile = self.printer.lookup_object('configfile')
+            for axis in calibrate_axes:
+                axis_name = axis.get_name()
+                operation_progress.respond(
+                    self.gcode, 'update', id='shaper_calibrate',
+                    type='input_shaper', step=calibrate_axes.index(axis) + 1,
+                    total=len(calibrate_axes), phase='calculating',
+                    axis=axis_name)
+                gcmd.respond_info(
+                        "Calculating the best input shaper parameters for %s axis"
+                        % (axis_name,))
+                calibration_data[axis].normalize_to_frequencies()
+                systime = self.printer.get_reactor().monotonic()
+                toolhead = self.printer.lookup_object('toolhead')
+                toolhead_info = toolhead.get_status(systime)
+                scv = toolhead_info['square_corner_velocity']
+                max_freq = self._get_max_calibration_freq()
+                best_shaper, all_shapers = helper.find_best_shaper(
+                        calibration_data[axis], max_smoothing=max_smoothing,
+                        scv=scv, max_freq=max_freq, logger=gcmd.respond_info)
+                gcmd.respond_info(
+                        "Recommended shaper_type_%s = %s, shaper_freq_%s = %.1f Hz"
+                        % (axis_name, best_shaper.name,
+                           axis_name, best_shaper.freq))
+                if input_shaper is not None:
+                    helper.apply_params(input_shaper, axis_name,
+                                        best_shaper.name, best_shaper.freq)
+                helper.save_params(configfile, axis_name,
+                                   best_shaper.name, best_shaper.freq)
+                csv_name = self.save_calibration_data(
+                        'calibration_data', name_suffix, helper, axis,
+                        calibration_data[axis], all_shapers, max_freq=max_freq)
+                gcmd.respond_info(
+                        "Shaper calibration data written to %s file" % (csv_name,))
             gcmd.respond_info(
-                    "Calculating the best input shaper parameters for %s axis"
-                    % (axis_name,))
-            calibration_data[axis].normalize_to_frequencies()
-            systime = self.printer.get_reactor().monotonic()
-            toolhead = self.printer.lookup_object('toolhead')
-            toolhead_info = toolhead.get_status(systime)
-            scv = toolhead_info['square_corner_velocity']
-            max_freq = self._get_max_calibration_freq()
-            best_shaper, all_shapers = helper.find_best_shaper(
-                    calibration_data[axis], max_smoothing=max_smoothing,
-                    scv=scv, max_freq=max_freq, logger=gcmd.respond_info)
-            gcmd.respond_info(
-                    "Recommended shaper_type_%s = %s, shaper_freq_%s = %.1f Hz"
-                    % (axis_name, best_shaper.name,
-                       axis_name, best_shaper.freq))
-            if input_shaper is not None:
-                helper.apply_params(input_shaper, axis_name,
-                                    best_shaper.name, best_shaper.freq)
-            helper.save_params(configfile, axis_name,
-                               best_shaper.name, best_shaper.freq)
-            csv_name = self.save_calibration_data(
-                    'calibration_data', name_suffix, helper, axis,
-                    calibration_data[axis], all_shapers, max_freq=max_freq)
-            gcmd.respond_info(
-                    "Shaper calibration data written to %s file" % (csv_name,))
-        gcmd.respond_info(
-            "The SAVE_CONFIG command will update the printer config file\n"
-            "with these parameters and restart the printer.")
+                "The SAVE_CONFIG command will update the printer config file\n"
+                "with these parameters and restart the printer.")
+        except Exception:
+            operation_progress.respond(
+                self.gcode, 'error', id='shaper_calibrate',
+                type='input_shaper', reason='failed')
+            raise
+        operation_progress.respond(
+            self.gcode, 'end', id='shaper_calibrate',
+            type='input_shaper', result='completed')
     cmd_MEASURE_AXES_NOISE_help = (
         "Measures noise of all enabled accelerometer chips")
     def cmd_MEASURE_AXES_NOISE(self, gcmd):
