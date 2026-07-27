@@ -2286,6 +2286,8 @@ class ProbeEddyScanningProbe:
         self._sampler: ProbeEddySampler = None
 
         self._notes = []
+        self._progress_callback = None
+        self._next_progress_note = 0
 
     def get_probe_params(self, gcmd):
         # this seems to be all that external users of get_probe_params
@@ -2311,10 +2313,48 @@ class ProbeEddyScanningProbe:
         logging.info(f"current z:{current_z}, probe height:{probe_height}, offset:{self._tap_offset}")
         self.eddy.probe_to_start_position(current_z)
         self._sampler = self.eddy.start_sampler()
+        self._sampler.add_sample_callback(self._report_ready_results)
 
     def end_probe_session(self):
         self._sampler.finish()
         self._sampler = None
+
+    def set_progress_callback(self, callback):
+        self._progress_callback = callback
+
+    def _make_progress_result(self, note):
+        start_time, sample_time, th_pos = note
+        if th_pos is None:
+            th_pos, _ = self.eddy._get_trapq_position(sample_time)
+            if th_pos is None:
+                raise self._printer.command_error(
+                    "No trapq history found for %.3f and no position!" % (
+                        sample_time,))
+
+        end_time = start_time + self._sample_time
+        height = self._sampler.find_height_at_time(start_time, end_time)
+        if not math.isclose(th_pos[2], self._scan_z, rel_tol=1e-3):
+            logging.info(
+                "ProbeEddyScanningProbe warning: toolhead not at "
+                "home_trigger_height (%.3f) during probes (saw %.3f)" % (
+                    self._scan_z, th_pos[2]))
+        height += self._tap_offset
+        z_deviation = th_pos[2] - height
+        return [th_pos[0], th_pos[1], float(self._scan_z + z_deviation)]
+
+    def _report_ready_results(self):
+        if self._progress_callback is None or not self._notes:
+            return
+        self._sampler._update_samples()
+        if not self._sampler.times:
+            return
+        last_sample_time = self._sampler.times[-1]
+        while self._next_progress_note < len(self._notes):
+            note = self._notes[self._next_progress_note]
+            if last_sample_time < note[0] + self._sample_time:
+                break
+            self._progress_callback(self._make_progress_result(note))
+            self._next_progress_note += 1
 
     def _rapid_lookahead_cb(self, time, th_pos):
         # The time passed here is the time when the move finishes;
@@ -2386,6 +2426,7 @@ class ProbeEddyScanningProbe:
 
         # reset notes so that this session can continue to be used
         self._notes = []
+        self._next_progress_note = 0
 
         # Allow axis_twist_compensation to update results
         for epos in results:
@@ -2671,6 +2712,7 @@ class ProbeEddySampler:
         self.heights = [] if self._fmap is not None else None
 
         self.memos = dict()
+        self._sample_callbacks = []
 
     @property
     def raw_count(self):
@@ -2712,8 +2754,13 @@ class ProbeEddySampler:
 
         self.times.extend(times)
         self.raw_freqs.extend(raw_freqs)
+        for callback in self._sample_callbacks:
+            callback()
 
         return True
+
+    def add_sample_callback(self, callback):
+        self._sample_callbacks.append(callback)
 
     def start(self):
         if self._stopped:

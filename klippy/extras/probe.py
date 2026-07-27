@@ -411,6 +411,7 @@ class ProbePointsHelper:
         self.probe_offsets = (0., 0., 0.)
         self.manual_results = []
         self.probe_progress_callback = None
+        self.probe_cancel_callback = None
     def minimum_points(self,n):
         if len(self.probe_points) < n:
             raise self.printer.config_error(
@@ -424,6 +425,8 @@ class ProbePointsHelper:
         return self.lift_speed
     def set_probe_progress_callback(self, callback):
         self.probe_progress_callback = callback
+    def set_probe_cancel_callback(self, callback):
+        self.probe_cancel_callback = callback
     def _report_probe_progress(self, probe_num, result=None):
         if self.probe_progress_callback is not None:
             self.probe_progress_callback(
@@ -478,19 +481,27 @@ class ProbePointsHelper:
                              " probe's z_offset")
         probe_session = probe.start_probe_session(gcmd)
         probe_num = 0
+        reported_progress = set()
         while 1:
             self._raise_tool(not probe_num)
             if probe_num >= len(self.probe_points):
                 results = probe_session.pull_probed_results()
+                for index, result in enumerate(results, start=1):
+                    if index not in reported_progress:
+                        self._report_probe_progress(index, result)
+                        reported_progress.add(index)
                 done = self._invoke_callback(results)
                 if done:
                     break
                 # Caller wants a "retry" - restart probing
                 probe_num = 0
+                reported_progress.clear()
             self._move_next(probe_num)
             result = probe_session.run_probe(gcmd)
             probe_num += 1
-            self._report_probe_progress(probe_num, result)
+            if result is not None:
+                self._report_probe_progress(probe_num, result)
+                reported_progress.add(probe_num)
         probe_session.end_probe_session()
     def _manual_probe_start(self):
         self._raise_tool(not self.manual_results)
@@ -506,6 +517,8 @@ class ProbePointsHelper:
                                        self._manual_probe_finalize)
     def _manual_probe_finalize(self, kin_pos):
         if kin_pos is None:
+            if self.probe_cancel_callback is not None:
+                self.probe_cancel_callback()
             return
         self.manual_results.append(kin_pos)
         self._report_probe_progress(len(self.manual_results), kin_pos)
