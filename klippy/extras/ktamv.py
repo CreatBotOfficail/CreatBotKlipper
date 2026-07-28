@@ -4,6 +4,7 @@ import logging
 import numpy as np
 from enum import Enum, auto
 from collections import namedtuple
+from . import operation_progress
 
 FRAME_WIDTH = 640
 FRAME_HEIGHT = 480
@@ -719,6 +720,9 @@ class Ktamv:
     def cmd_KTAMV_CALIB_NOZZLE(self, gcmd):
         gcmd.respond_info("Starting nozzle calibration")
         self.calibration_retries = 0
+        self._xy_offset_progress_active = True
+        self._report_xy_offset_progress(
+            'begin', step=0, total=5, phase='preparing')
         try:
             self.calibration_state = {
                 'step': CalibrationStep.INITIALIZE,
@@ -729,6 +733,23 @@ class Ktamv:
             self.reactor.register_callback(self._polling_step)
         except Exception as e:
             self._handle_operation_failure(f"Nozzle calibration failed: {str(e)}")
+
+    def _report_xy_offset_progress(self, action, **fields):
+        if not getattr(self, '_xy_offset_progress_active', False) \
+                and action != 'begin':
+            return
+        operation_progress.respond(
+            self.gcode, action, id='dual_nozzle_xy_offset',
+            type='dual_nozzle_xy_offset', **fields)
+
+    def _report_xy_offset_error(self, reason):
+        self._report_xy_offset_progress(
+            'error', result='failed', reason=reason)
+        self._xy_offset_progress_active = False
+
+    def _report_xy_offset_update(self, step, phase, **fields):
+        self._report_xy_offset_progress(
+            'update', step=step, total=5, phase=phase, **fields)
 
     cmd_KTAMV_CALIB_CAMERA_help = (
         "Automatically searches for the nozzle via rectangular spiral,"
@@ -865,12 +886,14 @@ class Ktamv:
             }
 
             if current_step == CalibrationStep.INITIALIZE:
+                self._report_xy_offset_update(0, 'preparing')
                 self.calibration_status['status'] = 'homing'
                 self.pm.ensureHomed(True)
                 self.clean_nozzle()
                 state['step'] = CalibrationStep.START_CAMERA_CALIBRATION
 
             elif current_step == CalibrationStep.START_CAMERA_CALIBRATION:
+                self._report_xy_offset_update(1, 'camera_calibration')
                 self._start_camera_calibration(gcmd)
                 state['step'] = CalibrationStep.WAIT_CAMERA_CALIBRATION
 
@@ -880,6 +903,7 @@ class Ktamv:
                     state['step'] = CalibrationStep.START_T0_NOZZLE_CALIBRATION
 
             elif current_step == CalibrationStep.START_T0_NOZZLE_CALIBRATION:
+                self._report_xy_offset_update(2, 'nozzle_t0_calibration')
                 self._start_nozzle_calibration(gcmd)
                 state['step'] = CalibrationStep.WAIT_T0_NOZZLE_CALIBRATION
 
@@ -888,6 +912,7 @@ class Ktamv:
                     state['step'] = CalibrationStep.SET_ORIGIN_AND_SWITCH_TOOL
 
             elif current_step == CalibrationStep.SET_ORIGIN_AND_SWITCH_TOOL:
+                self._report_xy_offset_update(3, 'switching_to_t1')
                 self.cmd_KTAMV_SET_ORIGIN(gcmd)
                 self._switch_tool(1)
                 state['step'] = CalibrationStep.MOVE_TO_CENTER_T1
@@ -902,6 +927,7 @@ class Ktamv:
                 state['step'] = CalibrationStep.START_T1_NOZZLE_CALIBRATION
 
             elif current_step == CalibrationStep.START_T1_NOZZLE_CALIBRATION:
+                self._report_xy_offset_update(4, 'nozzle_t1_calibration')
                 self._start_nozzle_calibration(gcmd)
                 state['step'] = CalibrationStep.WAIT_T1_NOZZLE_CALIBRATION
 
@@ -910,11 +936,18 @@ class Ktamv:
                     state['step'] = CalibrationStep.CALCULATE_AND_SAVE_OFFSET
 
             elif current_step == CalibrationStep.CALCULATE_AND_SAVE_OFFSET:
+                self._report_xy_offset_update(5, 'calculating')
                 self.cmd_KTAMV_GET_OFFSET(gcmd)
                 state['step'] = CalibrationStep.COMPLETE
 
             elif current_step == CalibrationStep.COMPLETE:
                 gcmd.respond_info("Nozzle calibration completed successfully!")
+                x_offset, y_offset = self._last_offset
+                self._report_xy_offset_progress(
+                    'end', result='completed',
+                    x_offset='%.3f' % (x_offset,),
+                    y_offset='%.3f' % (y_offset,))
+                self._xy_offset_progress_active = False
                 self.current_state = CalibrationState.IDLE
 
             if current_step != CalibrationStep.COMPLETE:
@@ -922,6 +955,7 @@ class Ktamv:
         except Exception as e:
             state['error'] = str(e)
             self.current_state = CalibrationState.IDLE
+            self._report_xy_offset_error('failed')
             raise self.gcode.error(f"Nozzle calibration failed: {str(e)}")
 
     def _start_camera_calibration(self, gcmd):
@@ -1057,6 +1091,20 @@ class Ktamv:
                     f"Offset: X{offsets[0]:.2f} Y{offsets[1]:.2f}"
                 )
 
+                state = getattr(self, 'calibration_state', {})
+                step = state.get('step')
+                if step == CalibrationStep.WAIT_T0_NOZZLE_CALIBRATION:
+                    progress_step, phase = 2, 'nozzle_t0_calibration'
+                elif step == CalibrationStep.WAIT_T1_NOZZLE_CALIBRATION:
+                    progress_step, phase = 4, 'nozzle_t1_calibration'
+                else:
+                    progress_step, phase = 0, 'detecting'
+                self._report_xy_offset_update(
+                    progress_step, phase,
+                    attempt=self.operation_retries + 1,
+                    dx='%.3f' % (offsets[0],),
+                    dy='%.3f' % (offsets[1],))
+
                 if abs(offsets[0]) < 0.005 and abs(offsets[1]) < 0.005:
                     self.current_state = CalibrationState.IDLE
                     self.adjusted_gain = self.gain
@@ -1182,6 +1230,7 @@ class Ktamv:
         self.gcode.run_script_from_command(f"T{tool_index}")
 
     def _handle_operation_failure(self, error_msg):
+        self._report_xy_offset_error('failed')
         self._cleanup_operation()
         self.current_state = CalibrationState.IDLE
         if hasattr(self, 'calibration_state'):
