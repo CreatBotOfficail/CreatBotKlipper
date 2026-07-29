@@ -5,7 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 import pins
-from . import manual_probe
+from . import manual_probe, operation_progress
 
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
@@ -45,6 +45,13 @@ class ProbeCommandHelper:
         self.last_z_result = 0.
         self.probe_calibrate_z = 0.
         self.name = config.get_name()
+        self._probe_offset_progress_enabled = True
+        self._probe_offset_progress_active = False
+        self._probe_offset_progress_starting = False
+        self.printer.register_event_handler(
+            'manual_probe:finished', self._handle_manual_probe_finished)
+        self.printer.register_event_handler(
+            'gcode:command_error', self._handle_gcode_command_error)
         self.register_commands()
 
     def register_commands(self):
@@ -87,6 +94,26 @@ class ProbeCommandHelper:
         pos = run_single_probe(self.probe, gcmd)
         gcmd.respond_info("Result is z=%.6f" % (pos[2],))
         self.last_z_result = pos[2]
+    def _report_probe_offset(self, action, **fields):
+        if action == 'begin':
+            if not getattr(self, '_probe_offset_progress_enabled', False):
+                return
+            self._probe_offset_progress_active = True
+        elif not getattr(self, '_probe_offset_progress_active', False):
+            return
+        operation_progress.respond(
+            self.printer.lookup_object('gcode'), action,
+            id='probe_z_offset', type='probe_z_offset', **fields)
+        if action != 'begin':
+            self._probe_offset_progress_active = False
+    def _handle_manual_probe_finished(self, success):
+        if not success:
+            self._report_probe_offset(
+                'error', result='failed', reason='cancelled')
+    def _handle_gcode_command_error(self):
+        if self._probe_offset_progress_starting:
+            self._report_probe_offset(
+                'error', result='failed', reason='failed')
     def probe_calibrate_finalize(self, kin_pos):
         if kin_pos is None:
             return
@@ -98,10 +125,20 @@ class ProbeCommandHelper:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer." % (self.name, z_offset))
         configfile = self.printer.lookup_object('configfile')
-        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        try:
+            configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        except Exception:
+            self._report_probe_offset(
+                'error', result='failed', reason='failed')
+            raise
+        self._report_probe_offset(
+            'end', result='completed', z_offset='%.3f' % (z_offset,))
     cmd_PROBE_CALIBRATE_help = "Calibrate the probe's z_offset"
     def cmd_PROBE_CALIBRATE(self, gcmd):
         manual_probe.verify_no_manual_probe(self.printer)
+        self._report_probe_offset(
+            'begin', step=0, total=1, phase='calibrating')
+        self._probe_offset_progress_starting = True
         params = self.probe.get_probe_params(gcmd)
         # Perform initial probe
         curpos = run_single_probe(self.probe, gcmd)
@@ -117,6 +154,7 @@ class ProbeCommandHelper:
         # Start manual probe
         manual_probe.ManualProbeHelper(self.printer, gcmd,
                                        self.probe_calibrate_finalize)
+        self._probe_offset_progress_starting = False
     cmd_PROBE_ACCURACY_help = "Probe Z-height accuracy at current XY position"
     def cmd_PROBE_ACCURACY(self, gcmd):
         params = self.probe.get_probe_params(gcmd)

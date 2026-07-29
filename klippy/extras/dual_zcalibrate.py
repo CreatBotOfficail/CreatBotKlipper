@@ -13,6 +13,8 @@ class OffsetProbeCommandHelper(probe.ProbeCommandHelper):
         self.last_z_result = 0.
         self.probe_calibrate_z = 0.
         self.name = config.get_name()
+        self._probe_offset_progress_enabled = False
+        self._probe_offset_progress_active = False
         self.register_commands()
 
     def register_commands(self):
