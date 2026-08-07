@@ -12,12 +12,16 @@ mkdir -p "$PLR_DIR" || {
 }
 
 filepath=$(sed -n "s/.*filepath *= *'\([^']*\)'.*/\1/p" "$CONFIG_FILE")
-cp "${filepath}" "/opt/plrtmpA.$$"
+if [[ -z "$filepath" || ! -f "$filepath" ]]; then
+    echo "ERROR: filepath is empty or file does not exist: '$filepath'" >> "$LOG_FILE"
+    exit 1
+fi
+cp "${filepath}" "/opt/plrtmpA.$$" || {
+    echo "ERROR: Unable to copy file: $filepath" >> "$LOG_FILE"
+    exit 1
+}
 sourcefile="/opt/plrtmpA.$$"
-
-raw_value=$(sed -n -E "s/^[[:space:]]*power_loss_paused[[:space:]]*=[[:space:]]*(True|False)[[:space:]]*(;.*)?$/\1/p" "$CONFIG_FILE" | tail -n1)
-is_pause=False
-[[ "${raw_value,,}" == "true" ]] && is_pause=True
+trap 'rm -f "$sourcefile"' EXIT
 
 raw_line=$(sed -n -E "s/power_resume_line[[:space:]]*=[[:space:]]*([1-9][0-9]*)['\"]?[[:space:]]*(;.*)?$/\1/p" "$CONFIG_FILE")
 run_line=$(tr -cd '0-9' <<< "$raw_line")
@@ -26,15 +30,8 @@ if [[ ! "$run_line" =~ ^[1-9][0-9]*$ ]]; then
     echo "Current configuration value:'$run_line'" >> "$LOG_FILE"
     exit 1
 fi
+run_line=$((run_line - 1))
 echo "When power outage, the printer is executing $run_line line of the file." >> "$LOG_FILE"
-
-raw_position=$(sed -n -E "s/power_resume_position[[:space:]]*=[[:space:]]*([1-9][0-9]*)['\"]?[[:space:]]*(;.*)?$/\1/p" "$CONFIG_FILE")
-target_pos=$(tr -cd '0-9' <<< "$raw_position")
-if [[ ! "$target_pos" =~ ^[1-9][0-9]*$ ]]; then
-    echo "ERROR: power_resume_position, It must be a valid positive integer" >> "$LOG_FILE"
-    echo "Current configuration value:'$target_pos'" >> "$LOG_FILE"
-    exit 1
-fi
 
 last_file="${filepath##*/}"
 
@@ -42,7 +39,7 @@ echo "Power-off recovery file path: $filepath" >> "$LOG_FILE"
 echo "Last printed file name: $last_file" >> "$LOG_FILE"
 plr="$last_file"
 
-cat "${sourcefile}" | awk '
+awk '
     {
         sub(/\r$/, "")
         if ($0 ~ /^;/ || $0 ~ /^[[:space:]]*$/) {
@@ -50,47 +47,45 @@ cat "${sourcefile}" | awk '
         } else {
             exit
         }
-    }' > "${PLR_DIR}/${plr}"
-
-line=$(awk -v target="$target_pos" '
-    BEGIN { current_pos = 0; line_number = 1 }
-    {
-        line_length = length($0) + 1  # +1 对应换行符(Linux: \n, Windows: \r\n)
-        if (current_pos <= target && target < current_pos + line_length) {
-            print line_number
-            exit
-        }
-        current_pos += line_length
-        line_number++
-    }
-' "$sourcefile")
-echo "When power outage, it was parsing the $target_pos byte and the $line line" >> "$LOG_FILE"
+    }' "$sourcefile" > "${PLR_DIR}/${plr}"
 
 line="$run_line"
 
-z_height=$(awk -v target_line="$line" '
-  BEGIN { found = 0 }
-  NR <= target_line {
-    if ($0 ~ /^[[:space:]]*G[01][[:space:]].*[zZ]/) {
-      if (match($0, /[zZ][[:space:]]*[-+]?[0-9]*\.?[0-9]+/)) {
-        z_str = substr($0, RSTART, RLENGTH)
-        if (match(z_str, /[-+]?[0-9]*\.?[0-9]+/)) {
-          z_val = substr(z_str, RSTART, RLENGTH)
-          found = 1
-        }
+z_height=$(head -n "$line" "$sourcefile" | tac | awk '
+  /^[[:space:]]*G[01][[:space:]].*[zZ]/ {
+    if (match($0, /[zZ][[:space:]]*[-+]?[0-9]*\.?[0-9]+/)) {
+      z_str = substr($0, RSTART, RLENGTH)
+      if (match(z_str, /[-+]?[0-9]*\.?[0-9]+/)) {
+        print substr(z_str, RSTART, RLENGTH)
+        exit
       }
     }
   }
-  NR == target_line {
-    if (found) {
-      print z_val
+')
+if [[ -z "$z_height" ]]; then
+    echo "ERROR: Unable to determine Z height at line $line" >> "$LOG_FILE"
+    exit 1
+fi
+
+z_ahead=$(sed -n "${line},$((line+3))p" "$sourcefile" | awk '
+  /^[[:space:]]*G[01][[:space:]].*[zZ]/ {
+    if (match($0, /[zZ][[:space:]]*[-+]?[0-9]*\.?[0-9]+/)) {
+      z_str = substr($0, RSTART, RLENGTH)
+      if (match(z_str, /[-+]?[0-9]*\.?[0-9]+/)) {
+        v = substr(z_str, RSTART, RLENGTH)
+        if (min == "" || v + 0 < min + 0) min = v
+      }
     }
-    exit
   }
-' "$sourcefile")
+  END { if (min != "") print min }
+')
+if [[ -n "$z_ahead" ]]; then
+    z_height=$(awk -v h="$z_height" -v a="$z_ahead" 'BEGIN { print (a + 0 < h + 0) ? a : h }')
+fi
+
 echo "When power outage, the printing height: $z_height, the offset value: $z_offset" >> "$LOG_FILE"
 
-z_pos=$(echo "${z_height} + ${z_offset}" | bc)
+z_pos=$(awk -v h="$z_height" -v o="$z_offset" 'BEGIN { print h + o }')
 echo "Assign the Z height as: $z_pos" >> "$LOG_FILE"
 
 echo "SET_KINEMATIC_POSITION Z=${z_pos}" >> "${PLR_DIR}/${plr}"
@@ -129,37 +124,40 @@ if [ -n "$start_info" ]; then
 fi
 
 
+if [[ "$is_plr_file" == "False" ]]; then
 awk -v plr="${PLR_DIR}/${plr}" '
     BEGIN {
         bed_temp = 0
         print_temp = 0
-        cmd_generated = 0
+        print_temp1 = 0
     }
-    $0 ~ /;End of Gcode/,0 {
-        gsub(/\r?\n/, " ")
-        gsub(/;/, "\n")
-        gsub(/[ \t]+/, " ")
-
-        if (match($0, /material_bed_temperature[ =]+([0-9]+)/, m))
-            bed_temp = m[1]
-        if (match($0, /material_print_temperature[ =]+([0-9]+)/, m))
-            print_temp = m[1]
-
+    {
+        gsub(/\r/, "")
+        # 兼容 material_bed_temperature 和 first_layer_bed_temperature
+        if (match($0, /(material_bed_temperature|first_layer_bed_temperature)[ =]+([0-9]+)/, m))
+            bed_temp = m[2]
+        # 兼容 material_print_temperature 和 nozzle_temperature
+        if (match($0, /(material_print_temperature|nozzle_temperature_initial_layer|nozzle_temperature)[ =]+([0-9]+)/, m)) {
+            if (print_temp == 0) print_temp = m[2]
+            else if (print_temp1 == 0) print_temp1 = m[2]
+        }
+    }
+    END {
         if (bed_temp > 0 || print_temp > 0) {
-            if (!cmd_generated) {
-                print "; 温度控制指令"
-                cmd_generated = 1
-            }
+            print "; 温度控制指令"
             if (bed_temp > 0) {
                 printf "M140 S%d\nM190 S%d\n", bed_temp, bed_temp
             }
             if (print_temp > 0) {
-                printf "M104 S%d\nM109 S%d\n", print_temp, print_temp
+                printf "M104 T0 S%d\nM109 T0 S%d\n", print_temp, print_temp
             }
-            exit
+            if (print_temp1 > 0) {
+                printf "M104 T1 S%d\nM109 T1 S%d\n", print_temp1, print_temp1
+            }
         }
     }
 ' "$sourcefile" >> "${PLR_DIR}/${plr}"
+fi
 
 awk -v end_line="$line" '
     BEGIN { last_mode = ""; e_value = "" }
@@ -202,21 +200,9 @@ target_position=$(awk -v line_num="$line" 'NR == line_num { gsub(/E[0-9.]+/, "")
     echo 'G1 X5'
     echo 'G1 Y5'
     awk -v end_line="$line" '
-        NR > end_line {
-            if (found) {
-                print last_match
-            }
-            exit
-        }
-        /^T[01]/ {
-            last_match = $0
-            found = 1
-        }
-        END {
-            if (found) {
-                print last_match
-            }
-        }
+        NR > end_line { exit }
+        /^T[01]/ { last_match = $0; found = 1 }
+        END { if (found) print last_match }
     ' "$sourcefile"
 
     if [ -n "$target_position" ]; then
@@ -230,5 +216,4 @@ echo "G1 Z${z_height} F3000" >> "${PLR_DIR}/${plr}"
 sed -n "${line},$ p" "${sourcefile}" >> "${PLR_DIR}/${plr}"
 echo "Append the file from ${line} line to ${PLR_DIR}/${plr}" >> "$LOG_FILE"
 
-rm /opt/plrtmpA.$$
 echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> [$(date '+%F %T')] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<" >> "$LOG_FILE"
