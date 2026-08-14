@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math
+from . import operation_progress
 
 HOMING_START_DELAY = 0.001
 ENDSTOP_SAMPLE_TIME = .000015
@@ -266,9 +267,23 @@ class Homing:
 class PrinterHoming:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self._homing_progress_enabled = True
+        self._homing_progress_active = False
         # Register g-code commands
         gcode = self.printer.lookup_object('gcode')
         gcode.register_command('G28', self.cmd_G28)
+    def _report_homing(self, action, **fields):
+        if action == 'begin':
+            if not getattr(self, '_homing_progress_enabled', False):
+                return
+            self._homing_progress_active = True
+        elif not getattr(self, '_homing_progress_active', False):
+            return
+        operation_progress.respond(
+            self.printer.lookup_object('gcode'), action,
+            id='homing', type='homing', **fields)
+        if action != 'begin':
+            self._homing_progress_active = False
     def manual_home(self, toolhead, endstops, pos, speed,
                     triggered, check_triggered):
         hmove = HomingMove(self.printer, endstops, toolhead)
@@ -305,12 +320,17 @@ class PrinterHoming:
         if not axes:
             axes = [0, 1, 2]
             axis_names = ['X', 'Y', 'Z']
+        self._report_homing(
+            'begin', step=0, total=len(axes),
+            axes=''.join(axis_names).lower())
         homing_state = Homing(self.printer)
         homing_state.set_axes(axes)
         kin = self.printer.lookup_object('toolhead').get_kinematics()
         try:
             kin.home(homing_state)
         except self.printer.command_error:
+            self._report_homing(
+                'error', result='failed', reason='failed')
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
                     "Homing failed due to printer shutdown")
@@ -319,6 +339,8 @@ class PrinterHoming:
         toolhead = self.printer.lookup_object('toolhead')
         axes_str = ''.join(axis_names).lower()
         toolhead.set_reliable_axes('add', axes_str)
+        self._report_homing(
+            'end', result='completed', axes=axes_str)
 
 def load_config(config):
     return PrinterHoming(config)
