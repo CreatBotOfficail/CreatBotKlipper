@@ -78,6 +78,9 @@ class NozzleCleaner:
             
             self._set_temperature(self.hotend_temp, wait=False, index=extruder_index)
             self._ensure_homed()
+            self.clean_z_height += self.retract_z_height
+            self._move_to_clean_position()
+            self.clean_z_height -= self.retract_z_height
             self._set_temperature(self.hotend_temp, wait=True, index=extruder_index)
             self.gcode.run_script_from_command(f'G90')
             
