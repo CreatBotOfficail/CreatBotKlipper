@@ -133,8 +133,12 @@ class VirtualSD:
             self._set_quick_pause()
             while self.work_timer is not None and not self.cmd_from_sd:
                 self.reactor.pause(self.reactor.monotonic() + .001)
-            self.file_position = self._get_position_by_line(self.file_runline)
-            self.file_line = self.file_runline
+            if self.file_runline > 0:
+                # work_handler increments file_line before dispatching a
+                # line, so the line counter must be one less than the line
+                # being resumed at, otherwise taskline is off by one
+                self.file_position = self._get_position_by_line(self.file_runline)
+                self.file_line = self.file_runline - 1
     def do_resume(self):
         if self.work_timer is not None:
             raise self.gcode.error("SD busy")
@@ -293,11 +297,11 @@ class VirtualSD:
             raise self.gcode.error("Printer not ready")
         kin = toolhead.get_kinematics()
         steppers = kin.get_steppers()
-        linfo = [(s.get_name(), s.get_stepper_taskline()) for s in steppers if s.get_name() != "stepper_z"]
+        linfo = [(s.get_name(), s.get_stepper_taskline()) for s in steppers]
         positions = [position for _, position in linfo if position != 0]
-        max_position = min(positions) if positions else 0
+        runline = min(positions) if positions else 0
         self.linfo = linfo
-        self.file_runline = max_position
+        self.file_runline = runline
 
     def _set_quick_pause(self):
         toolhead = self.printer.lookup_object('toolhead')
@@ -314,17 +318,32 @@ class VirtualSD:
                     break
                 extruders.append(extruder)
             return extruders
-        for extruder in get_extruders():
+        extruders = get_extruders()
+        for extruder in extruders:
             extruder.extruder_stepper.stepper.set_stepper_stop()
         for stepper in steppers:
             stepper.set_stepper_stop()
-        for extruder in get_extruders():
-            extruder.extruder_stepper.stepper.set_stepper_pause()
+        # Read the actual position of the active extruder so the G-code E
+        # coordinate can be synced on resume (otherwise resume under or
+        # over extrudes by the look-ahead E distance)
+        active_extruder = toolhead.get_extruder()
+        e_pos = None
+        for extruder in extruders:
+            estepper = extruder.extruder_stepper.stepper
+            pause_pos = estepper.set_stepper_pause()
+            if extruder is active_extruder:
+                e_pos = estepper.mcu_to_commanded_position(pause_pos)
         kin_spos = {
             stepper.get_name(): stepper.mcu_to_commanded_position(stepper.set_stepper_pause())
             for stepper in steppers
         }
         self.toolhead_pos = kin.calc_position(kin_spos)
+        if e_pos is not None:
+            self.toolhead_pos = list(self.toolhead_pos) + [e_pos]
+            # Sync extruder itersolve position; _is_pause_stop keeps the
+            # mcu position offset untouched
+            active_extruder.extruder_stepper.stepper.set_position(
+                [e_pos, 0., 0.])
         self._set_kinematic_position(self.toolhead_pos)
 
     def _get_position_by_line(self, target_line):
@@ -350,10 +369,12 @@ class VirtualSD:
     def _set_kinematic_position(self, pos):
         toolhead = self.printer.lookup_object('toolhead')
         toolhead.get_last_move_time()
-        curpos = toolhead.get_position()
+        if len(pos) < 4:
+            curpos = toolhead.get_position()
+            pos = [pos[0], pos[1], pos[2], curpos[3]]
         logging.info("set kinematic position pos=%.3f,%.3f,%.3f,%.3f",
-                     pos[0], pos[1], pos[2], curpos[3])
-        toolhead.set_position([pos[0], pos[1], pos[2], curpos[3]], homing_axes='xyz')
+                     pos[0], pos[1], pos[2], pos[3])
+        toolhead.set_position(pos, homing_axes='xyz')
 
     def cmd_GET_TASKLINE(self, gcmd):
         if not self.must_pause_work:

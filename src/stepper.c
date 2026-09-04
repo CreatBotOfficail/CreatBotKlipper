@@ -335,12 +335,12 @@ command_stepper_get_taskline(uint32_t *args)
         struct stepper_move *m = container_of(mn, struct stepper_move, node);
         uint32_t current = m->taskline;
         if (current != 0) {
-            if (min_nonzero == 0) {
-                min_nonzero = current;
-            } else if (current < min_nonzero) {
-                min_nonzero = current;
-            }
-        }     
+            // Moves are queued in time order, so the first non-zero
+            // taskline is the minimum one - no need to scan the whole
+            // queue with irqs disabled
+            min_nonzero = current;
+            break;
+        }
         mn = mn->next;
     }
     irq_enable();
