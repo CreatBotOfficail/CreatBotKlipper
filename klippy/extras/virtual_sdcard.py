@@ -402,6 +402,7 @@ class VirtualSD:
         partial_input = ""
         lines = []
         error_message = None
+        cancel_on_error = False
         while not self.must_pause_work:
             if not lines:
                 # Read more data
@@ -441,6 +442,7 @@ class VirtualSD:
                 self.gcode.run_script(line)
             except self.gcode.error as e:
                 error_message = str(e)
+                cancel_on_error = self.gcode.is_cancel_requested()
                 try:
                     self.gcode.run_script(self.on_error_gcode.render())
                 except:
@@ -465,7 +467,10 @@ class VirtualSD:
         self.work_timer = None
         self.cmd_from_sd = False
         if error_message is not None:
-            self.print_stats.note_error(error_message)
+            if cancel_on_error:
+                self.print_stats.note_cancel()
+            else:
+                self.print_stats.note_error(error_message)
         elif self.current_file is not None:
             self.print_stats.note_pause()
         else:
