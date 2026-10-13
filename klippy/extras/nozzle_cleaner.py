@@ -30,7 +30,11 @@ class NozzleCleaner:
         self.retract_z_height = config.getfloat('retract_z_height', 20.0)
         self.move_speed = config.getfloat('move_speed', 6000.0)
         self.clean_speed = config.getfloat('clean_speed', 4000.0)
-        self.hotend_temp = config.getfloat('hotend_temp', 150.0)
+        # Fallback cleaning temperature, used until a print has recorded one.
+        # Kept as a config option so it stays overridable per machine.
+        self.hotend_temp = config.getfloat('hotend_temp', 200.0)
+        # Cleaning temperature is the left nozzle print temperature minus this.
+        self.temp_offset = config.getfloat('temp_offset', 20.0)
         self.nozzle_loops = config.getint('nozzle_loops', 2)
         self.nozzle_loop_x = config.getint('nozzle_loop_x', 20)
         self.nozzle_loop_y = config.getint('nozzle_loop_y', 30)
@@ -58,11 +62,24 @@ class NozzleCleaner:
             except:
                 pass
 
-    cmd_CLEAN_NOZZLE_help = "Clean the nozzle with configurable modes"
+    cmd_CLEAN_NOZZLE_help = ("Clean the nozzle. RECORD_TEMP=<print temp> stores "
+                             "<print temp> - 20 as the cleaning temperature and "
+                             "uses it now and for later cleanings")
     def cmd_CLEAN_NOZZLE(self, gcmd):
         try:
             self.apply_offset()
-            
+
+            # A print passes the left nozzle print temperature here. The cleaning
+            # temperature is always the stored value (print temperature - 20), so
+            # this print, later prints and manual leveling all agree.
+            print_temp = gcmd.get_float('RECORD_TEMP', None)
+            if print_temp is not None and print_temp > self.temp_offset:
+                self.gcode.run_script_from_command(
+                    'SAVE_VARIABLE VARIABLE=nozzle_temp VALUE=%d'
+                    % int(print_temp - self.temp_offset))
+
+            hotend_temp = self.get_clean_temp()
+
             target_extruder = gcmd.get('EXTRUDER', None)
             
             extruder_index = []
@@ -76,12 +93,12 @@ class NozzleCleaner:
             else:
                 extruder_index = list(range(len(self.extruders)))
             
-            self._set_temperature(self.hotend_temp, wait=False, index=extruder_index)
+            self._set_temperature(hotend_temp, wait=False, index=extruder_index)
             self._ensure_homed()
             self.clean_z_height += self.retract_z_height
             self._move_to_clean_position()
             self.clean_z_height -= self.retract_z_height
-            self._set_temperature(self.hotend_temp, wait=True, index=extruder_index)
+            self._set_temperature(hotend_temp, wait=True, index=extruder_index)
             self.gcode.run_script_from_command(f'G90')
             
             for i in extruder_index:
@@ -116,6 +133,17 @@ class NozzleCleaner:
         if 'camera_y_offset_val' in save_variables:
             self.run_y_min = self.clean_y_min + save_variables['camera_y_offset_val']
             self.run_y_max = self.clean_y_max + save_variables['camera_y_offset_val']
+
+    def get_clean_temp(self):
+        # The stored value is authoritative (a print recorded print temp - offset).
+        # Fall back to the config default when no print has recorded one yet.
+        try:
+            save_variables = self.printer.lookup_object('save_variables').allVariables
+            if 'nozzle_temp' in save_variables:
+                return max(0, int(save_variables['nozzle_temp']))
+        except Exception:
+            logging.exception("nozzle_cleaner: unable to read saved nozzle_temp")
+        return max(0, int(self.hotend_temp))
 
     def _ensure_homed(self):
         curtime = self.printer.get_reactor().monotonic()
