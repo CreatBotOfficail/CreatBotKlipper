@@ -39,8 +39,10 @@ class NozzleCleaner:
         self.nozzle_loop_x = config.getint('nozzle_loop_x', 20)
         self.nozzle_loop_y = config.getint('nozzle_loop_y', 30)
 
-        self.x_step = (self.run_x_max - self.run_x_min) / self.nozzle_loop_x
-        self.y_step = (self.run_y_max - self.run_y_min) / self.nozzle_loop_y
+        # X passes advance in Y and Y passes advance in X, so each step must
+        # be sized by the number of passes actually made along that axis.
+        self.x_step = (self.run_x_max - self.run_x_min) / self.nozzle_loop_y
+        self.y_step = (self.run_y_max - self.run_y_min) / self.nozzle_loop_x
         self.printer.add_object('nozzle_cleaner', self)
         self.gcode.register_command('CLEAN_NOZZLE', self.cmd_CLEAN_NOZZLE, desc=self.cmd_CLEAN_NOZZLE_help)
 
