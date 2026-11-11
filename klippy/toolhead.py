@@ -256,6 +256,11 @@ class ToolHead:
         self.do_kick_flush_timer = True
         self.last_flush_time = self.min_restart_time = 0.
         self.need_flush_time = self.step_gen_time = self.clear_history_time = 0.
+        # Lead time granted to the host when the motion stream restarts after
+        # the queue went empty (see _calc_print_time).  Quick-pause lowers it
+        # for the retreat moves so they do not have to wait 250 ms; everything
+        # else keeps the stock value.
+        self.start_buffer_time = BUFFER_TIME_START
         # Kinematic step generation scan window time tracking
         self.kin_flush_delay = SDS_CHECK_TIME
         self.kin_flush_times = []
@@ -331,7 +336,7 @@ class ToolHead:
         est_print_time = self.mcu.estimated_print_time(curtime)
         kin_time = max(est_print_time + MIN_KIN_TIME, self.min_restart_time)
         kin_time += self.kin_flush_delay
-        min_print_time = max(est_print_time + BUFFER_TIME_START, kin_time)
+        min_print_time = max(est_print_time + self.start_buffer_time, kin_time)
         if min_print_time > self.print_time:
             self.print_time = min_print_time
             self.printer.send_event("toolhead:sync_print_time",
@@ -667,7 +672,13 @@ class ToolHead:
                "square_corner_velocity: %.6f" % (
                    self.max_velocity, self.max_accel,
                    self.min_cruise_ratio, self.square_corner_velocity))
-        self.printer.set_rollover_info("toolhead", "toolhead: %s" % (msg,))
+        # Keep the value for shutdown/rollover dumps, but do NOT log it: some
+        # g-code files emit SET_VELOCITY_LIMIT on nearly every move (33k+ times
+        # in the job of 2026-10-20), and logging each one means a write+flush
+        # 5 times per command - i.e. constant disk I/O that stalls the host
+        # exactly when a pause needs the stepper queue to be refilled quickly.
+        self.printer.set_rollover_info("toolhead", "toolhead: %s" % (msg,),
+                                      log=False)
         if (max_velocity is None and max_accel is None
             and square_corner_velocity is None and min_cruise_ratio is None):
             gcmd.respond_info(msg, log=False)
