@@ -5,7 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 import pins
-from . import manual_probe
+from . import manual_probe, operation_progress
 
 HINT_TIMEOUT = """
 If the probe did not move far enough to trigger, then
@@ -45,6 +45,13 @@ class ProbeCommandHelper:
         self.last_z_result = 0.
         self.probe_calibrate_z = 0.
         self.name = config.get_name()
+        self._probe_offset_progress_enabled = True
+        self._probe_offset_progress_active = False
+        self._probe_offset_progress_starting = False
+        self.printer.register_event_handler(
+            'manual_probe:finished', self._handle_manual_probe_finished)
+        self.printer.register_event_handler(
+            'gcode:command_error', self._handle_gcode_command_error)
         self.register_commands()
 
     def register_commands(self):
@@ -87,6 +94,26 @@ class ProbeCommandHelper:
         pos = run_single_probe(self.probe, gcmd)
         gcmd.respond_info("Result is z=%.6f" % (pos[2],))
         self.last_z_result = pos[2]
+    def _report_probe_offset(self, action, **fields):
+        if action == 'begin':
+            if not getattr(self, '_probe_offset_progress_enabled', False):
+                return
+            self._probe_offset_progress_active = True
+        elif not getattr(self, '_probe_offset_progress_active', False):
+            return
+        operation_progress.respond(
+            self.printer.lookup_object('gcode'), action,
+            id='probe_z_offset', type='probe_z_offset', **fields)
+        if action != 'begin':
+            self._probe_offset_progress_active = False
+    def _handle_manual_probe_finished(self, success):
+        if not success:
+            self._report_probe_offset(
+                'error', result='failed', reason='cancelled')
+    def _handle_gcode_command_error(self):
+        if self._probe_offset_progress_starting:
+            self._report_probe_offset(
+                'error', result='failed', reason='failed')
     def probe_calibrate_finalize(self, kin_pos):
         if kin_pos is None:
             return
@@ -98,10 +125,20 @@ class ProbeCommandHelper:
             "The SAVE_CONFIG command will update the printer config file\n"
             "with the above and restart the printer." % (self.name, z_offset))
         configfile = self.printer.lookup_object('configfile')
-        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        try:
+            configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        except Exception:
+            self._report_probe_offset(
+                'error', result='failed', reason='failed')
+            raise
+        self._report_probe_offset(
+            'end', result='completed', z_offset='%.3f' % (z_offset,))
     cmd_PROBE_CALIBRATE_help = "Calibrate the probe's z_offset"
     def cmd_PROBE_CALIBRATE(self, gcmd):
         manual_probe.verify_no_manual_probe(self.printer)
+        self._report_probe_offset(
+            'begin', step=0, total=1, phase='calibrating')
+        self._probe_offset_progress_starting = True
         params = self.probe.get_probe_params(gcmd)
         # Perform initial probe
         curpos = run_single_probe(self.probe, gcmd)
@@ -117,6 +154,7 @@ class ProbeCommandHelper:
         # Start manual probe
         manual_probe.ManualProbeHelper(self.printer, gcmd,
                                        self.probe_calibrate_finalize)
+        self._probe_offset_progress_starting = False
     cmd_PROBE_ACCURACY_help = "Probe Z-height accuracy at current XY position"
     def cmd_PROBE_ACCURACY(self, gcmd):
         params = self.probe.get_probe_params(gcmd)
@@ -368,6 +406,7 @@ class ProbeSessionHelper:
         # Calculate result
         epos = calc_probe_z_average(positions, params['samples_result'])
         self.results.append(epos)
+        return epos
     def pull_probed_results(self):
         res = self.results
         self.results = []
@@ -409,6 +448,8 @@ class ProbePointsHelper:
         self.lift_speed = self.speed
         self.probe_offsets = (0., 0., 0.)
         self.manual_results = []
+        self.probe_progress_callback = None
+        self.probe_cancel_callback = None
     def minimum_points(self,n):
         if len(self.probe_points) < n:
             raise self.printer.config_error(
@@ -420,6 +461,14 @@ class ProbePointsHelper:
         self.use_offsets = use_offsets
     def get_lift_speed(self):
         return self.lift_speed
+    def set_probe_progress_callback(self, callback):
+        self.probe_progress_callback = callback
+    def set_probe_cancel_callback(self, callback):
+        self.probe_cancel_callback = callback
+    def _report_probe_progress(self, probe_num, result=None):
+        if self.probe_progress_callback is not None:
+            self.probe_progress_callback(
+                probe_num, len(self.probe_points), result)
     def _move(self, coord, speed):
         self.printer.lookup_object('toolhead').manual_move(coord, speed)
     def _raise_tool(self, is_first=False):
@@ -470,18 +519,27 @@ class ProbePointsHelper:
                              " probe's z_offset")
         probe_session = probe.start_probe_session(gcmd)
         probe_num = 0
+        reported_progress = set()
         while 1:
             self._raise_tool(not probe_num)
             if probe_num >= len(self.probe_points):
                 results = probe_session.pull_probed_results()
+                for index, result in enumerate(results, start=1):
+                    if index not in reported_progress:
+                        self._report_probe_progress(index, result)
+                        reported_progress.add(index)
                 done = self._invoke_callback(results)
                 if done:
                     break
                 # Caller wants a "retry" - restart probing
                 probe_num = 0
+                reported_progress.clear()
             self._move_next(probe_num)
-            probe_session.run_probe(gcmd)
+            result = probe_session.run_probe(gcmd)
             probe_num += 1
+            if result is not None:
+                self._report_probe_progress(probe_num, result)
+                reported_progress.add(probe_num)
         probe_session.end_probe_session()
     def _manual_probe_start(self):
         self._raise_tool(not self.manual_results)
@@ -497,8 +555,11 @@ class ProbePointsHelper:
                                        self._manual_probe_finalize)
     def _manual_probe_finalize(self, kin_pos):
         if kin_pos is None:
+            if self.probe_cancel_callback is not None:
+                self.probe_cancel_callback()
             return
         self.manual_results.append(kin_pos)
+        self._report_probe_progress(len(self.manual_results), kin_pos)
         self._manual_probe_start()
 
 # Helper to obtain a single probe measurement

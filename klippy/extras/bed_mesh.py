@@ -4,7 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging, math, json, collections
-from . import probe
+from . import operation_progress, probe
 
 PROFILE_VERSION = 1
 PROFILE_OPTIONS = {
@@ -334,6 +334,12 @@ class BedMeshCalibrate:
         self.probe_mgr = ProbeManager(
             config, self.orig_config, self.probe_finalize
         )
+        self.probe_mgr.probe_helper.set_probe_progress_callback(
+            self._report_probe_progress)
+        self.probe_mgr.probe_helper.set_probe_cancel_callback(
+            self._report_probe_cancelled)
+        self.probe_mgr.set_rapid_scan_progress_callback(
+            self._report_rapid_scan_progress)
         try:
             self.probe_mgr.generate_points(
                 self.mesh_config, self.mesh_min, self.mesh_max,
@@ -649,8 +655,50 @@ class BedMeshCalibrate:
             self.update_config(gcmd)
         except BedMeshError as e:
             raise gcmd.error(str(e))
-        self.probe_mgr.start_probe(gcmd)
+        if self.probe_mgr.is_rapid_scan(gcmd):
+            self.operation_total = self.probe_mgr.get_rapid_scan_point_count()
+            phase = 'scanning'
+        else:
+            self.operation_total = len(self.probe_mgr.probe_helper.probe_points)
+            phase = 'probing'
+        operation_progress.respond(
+            self.gcode, 'begin', id='bed_mesh', type='bed_mesh', step=0,
+            total=self.operation_total, phase=phase)
+        try:
+            self.probe_mgr.start_probe(gcmd)
+        except Exception:
+            operation_progress.respond(
+                self.gcode, 'error', id='bed_mesh', type='bed_mesh',
+                reason='failed')
+            raise
+    def _report_probe_progress(self, step, total, result):
+        fields = {}
+        if result is not None:
+            fields = {
+                'point': step,
+                'probe_x': '%.3f' % (result[0],),
+                'probe_y': '%.3f' % (result[1],),
+                'probe_z': '%.6f' % (result[2],),
+            }
+        operation_progress.respond(
+            self.gcode, 'update', id='bed_mesh', type='bed_mesh',
+            step=step, total=total, phase='probing', **fields)
+    def _report_rapid_scan_progress(self, step, total, result):
+        operation_progress.respond(
+            self.gcode, 'update', id='bed_mesh', type='bed_mesh',
+            step=step, total=total, phase='scanning', point=step,
+            probe_x='%.3f' % (result[0],),
+            probe_y='%.3f' % (result[1],),
+            probe_z='%.6f' % (result[2],))
+    def _report_probe_cancelled(self):
+        operation_progress.respond(
+            self.gcode, 'error', id='bed_mesh', type='bed_mesh',
+            reason='cancelled')
     def probe_finalize(self, offsets, positions):
+        operation_progress.respond(
+            self.gcode, 'update', id='bed_mesh', type='bed_mesh',
+            step=self.operation_total, total=self.operation_total,
+            phase='generating')
         z_offset = offsets[2]
         positions = [[round(p[0], 2), round(p[1], 2), p[2]]
                      for p in positions]
@@ -785,6 +833,9 @@ class BedMeshCalibrate:
         self.gcode.respond_info("Mesh Bed Leveling Complete")
         if self._profile_name is not None:
             self.bedmesh.save_profile(self._profile_name)
+        operation_progress.respond(
+            self.gcode, 'end', id='bed_mesh', type='bed_mesh',
+            result='completed')
     def _dump_points(self, probed_pts, corrected_pts, offsets):
         # logs generated points with offset applied, points received
         # from the finalize callback, and the list of corrected points
@@ -871,16 +922,26 @@ class ProbeManager:
         return pprobe
 
     def start_probe(self, gcmd):
-        method = gcmd.get("METHOD", "automatic").lower()
-        can_scan = False
-        pprobe = self.get_current_probe()
-        if pprobe is not None:
-            probe_name = pprobe.get_status(None).get("name", "")
-            can_scan = "eddy" in probe_name
-        if method == "rapid_scan" and can_scan:
+        if self.is_rapid_scan(gcmd):
             self.rapid_scan_helper.perform_rapid_scan(gcmd)
         else:
             self.probe_helper.start_probe(gcmd)
+
+    def is_rapid_scan(self, gcmd):
+        if gcmd.get("METHOD", "automatic").lower() != "rapid_scan":
+            return False
+        pprobe = self.get_current_probe()
+        if pprobe is None:
+            return False
+        probe_name = pprobe.get_status(None).get("name", "")
+        return "eddy" in probe_name
+
+    def get_rapid_scan_point_count(self):
+        return sum(1 for _, is_probe_pt in self.iter_rapid_path()
+                   if is_probe_pt)
+
+    def set_rapid_scan_progress_callback(self, callback):
+        self.rapid_scan_helper.set_progress_callback(callback)
 
     def get_zero_ref_pos(self):
         return self.zero_ref_pos
@@ -1189,6 +1250,18 @@ class RapidScanHelper:
         self.speed = config.getfloat("speed", 50., above=0.)
         self.scan_height = config.getfloat("horizontal_move_z", 5.)
         self.finalize_callback = finalize_cb
+        self.progress_callback = None
+        self.progress_step = 0
+        self.progress_total = 0
+
+    def set_progress_callback(self, callback):
+        self.progress_callback = callback
+
+    def _report_progress(self, result):
+        self.progress_step += 1
+        if self.progress_callback is not None:
+            self.progress_callback(self.progress_step, self.progress_total,
+                                   result)
 
     def perform_rapid_scan(self, gcmd):
         speed = gcmd.get_float("SCAN_SPEED", self.speed)
@@ -1218,6 +1291,10 @@ class RapidScanHelper:
         probe_session = pprobe.start_probe_session(gcmd)
         offsets = pprobe.get_offsets()
         initial_move = True
+        self.progress_step = 0
+        self.progress_total = self.probe_manager.get_rapid_scan_point_count()
+        if hasattr(probe_session, 'set_progress_callback'):
+            probe_session.set_progress_callback(self._report_progress)
         for pos, is_probe_pt in self.probe_manager.iter_rapid_path():
             pos = self._apply_offsets(pos[:2], offsets)
             toolhead.manual_move(pos, speed)

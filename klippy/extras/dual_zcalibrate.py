@@ -1,6 +1,6 @@
 from enum import Enum, auto
-from . import probe
-import logging
+from . import operation_progress, probe
+import logging, math
 
 # Helper to implement common probing commands
 class OffsetProbeCommandHelper(probe.ProbeCommandHelper):
@@ -13,6 +13,8 @@ class OffsetProbeCommandHelper(probe.ProbeCommandHelper):
         self.last_z_result = 0.
         self.probe_calibrate_z = 0.
         self.name = config.get_name()
+        self._probe_offset_progress_enabled = False
+        self._probe_offset_progress_active = False
         self.register_commands()
 
     def register_commands(self):
@@ -41,6 +43,7 @@ class OffsetProbeCommandHelper(probe.ProbeCommandHelper):
 class CalibrationState(Enum):
     INIT = auto()
     LEFT_PROBE_ACCURACY = auto()
+    RIGHT_TOOL_SWITCH = auto()
     RIGHT_PROBE_ACCURACY = auto()
     FINISHED = auto()
     ABORTED = auto()
@@ -67,17 +70,37 @@ class DualProbeCalibrator:
             desc="Automatically calibrate dual-nozzle offset"
         )
 
+    def _report_z_offset_progress(self, action, **fields):
+        if not getattr(self, '_z_offset_progress_active', False) \
+                and action != 'begin':
+            return
+        operation_progress.respond(
+            self.gcode, action, id='dual_nozzle_z_offset',
+            type='dual_nozzle_z_offset', **fields)
+
     def cmd_DUAL_Z_PROBE_CALIBRATE(self, gcmd):
         if self.state != CalibrationState.INIT:
             gcmd.respond_info("A calibration process is already running. Please complete it first or restart the printer")
             return
         self.gcmd = gcmd
-        self._get_offset_var()
+        self._z_offset_progress_active = True
+        self._report_z_offset_progress(
+            'begin', step=0, total=4, phase='preparing')
+        if not self._get_offset_var():
+            self._fail_z_offset_calibration(
+                'missing_xy_offset',
+                'Missing XY offset calibration data')
+            return
         self.state = CalibrationState.LEFT_PROBE_ACCURACY
         self._start_next_step()
 
     def _get_offset_var(self):
-        save_variables = self.printer.lookup_object('save_variables').allVariables
+        try:
+            save_variables = self.printer.lookup_object(
+                'save_variables').allVariables
+        except Exception:
+            logging.exception("Unable to read saved XY offset calibration data")
+            return False
         missing_vars = []
         if "nozzle_x_offset_val" not in save_variables:
             missing_vars.append("nozzle_x_offset_val")
@@ -85,10 +108,11 @@ class DualProbeCalibrator:
             missing_vars.append("nozzle_y_offset_val")
         if missing_vars:
             self.gcmd.respond_info(f"Missing calibration data: {', '.join(missing_vars)}. Please complete XY offset calibration first.")
-            return
+            return False
         self.x_offset = self.base_x_offset - save_variables["nozzle_x_offset_val"]
         self.y_offset = save_variables["nozzle_y_offset_val"]
         self.z_calibrate_compensation = save_variables.get("nozzle_z_offset_compensation", 0.)
+        return True
 
     def _start_next_step(self):
         if self._waiting:
@@ -97,22 +121,28 @@ class DualProbeCalibrator:
         current_state = self.state
         if current_state == CalibrationState.LEFT_PROBE_ACCURACY:
             self.gcmd.respond_info("Starting left nozzle z_offset calibration...")
+            self._report_z_offset_update(1, 'probe_t0_accuracy')
             self._run_automatic_gcode(
                 "G28\n"
                 "G4 P1000\n"
                 "PROBE_ACCURACY",
                 self._on_left_accuracy_done
             )
-        elif current_state == CalibrationState.RIGHT_PROBE_ACCURACY:
-            self.gcmd.respond_info("Obtaining right nozzle probe average value...")
+        elif current_state == CalibrationState.RIGHT_TOOL_SWITCH:
+            self._report_z_offset_update(2, 'switching_to_t1')
             self._run_automatic_gcode(
                 "T1\n"
                 f"_CLIENT_LINEAR_MOVE X={-self.x_offset} Y={-self.y_offset} F=6000\n"
-                "G4 P1000\n"
-                "PROBE_ACCURACY_NOZZLE",
-                self._on_right_accuracy_done
+                "G4 P1000",
+                None
             )
+        elif current_state == CalibrationState.RIGHT_PROBE_ACCURACY:
+            self.gcmd.respond_info("Obtaining right nozzle probe average value...")
+            self._report_z_offset_update(3, 'probe_t1_accuracy')
+            self._run_automatic_gcode(
+                "PROBE_ACCURACY_NOZZLE", self._on_right_accuracy_done)
         elif current_state == CalibrationState.FINISHED:
+            self._report_z_offset_update(4, 'calculating')
             self._calculate_final_offset()
         elif current_state == CalibrationState.ABORTED:
             self.gcmd.respond_info("Calibration process has been aborted")
@@ -123,9 +153,18 @@ class DualProbeCalibrator:
         try:
             self.gcode.run_script_from_command(cmd)
         except Exception as e:
-            self.gcmd.respond_info(f"Gcode Command Error")
-        finally:
+            logging.exception("Dual nozzle Z offset G-code command failed")
+            self._fail_z_offset_calibration(
+                'gcode_command_failed', 'Gcode Command Error')
+            return False
+        try:
             self._on_automatic_gcode_done()
+        except Exception as e:
+            logging.exception("Dual nozzle Z offset probe result failed")
+            self._fail_z_offset_calibration(
+                'probe_result_failed', 'Probe accuracy result error')
+            return False
+        return True
 
     def _on_automatic_gcode_done(self):
         if self.next_callback:
@@ -137,6 +176,8 @@ class DualProbeCalibrator:
     def _advance_state(self):
         current = self.state
         if current == CalibrationState.LEFT_PROBE_ACCURACY:
+            self.state = CalibrationState.RIGHT_TOOL_SWITCH
+        elif current == CalibrationState.RIGHT_TOOL_SWITCH:
             self.state = CalibrationState.RIGHT_PROBE_ACCURACY
         elif current == CalibrationState.RIGHT_PROBE_ACCURACY:
             self.state = CalibrationState.FINISHED
@@ -152,7 +193,6 @@ class DualProbeCalibrator:
         self.gcmd.respond_info(f"Right nozzle probe average: {right_avg:.6f}")
 
     def _calculate_final_offset(self):
-        output = ""
         try:
             left_avg = self.data['left_probe_avg']
             right_avg = self.data['right_probe_avg']
@@ -163,29 +203,54 @@ class DualProbeCalibrator:
                 f"Final dual-nozzle offset:   {final_offset:.6f}\n"
             )
             if not (-self.max_z_offset <= final_offset <= self.max_z_offset):
-                error_msg = (
+                self._fail_z_offset_calibration(
+                    'offset_out_of_range',
                     f"Final offset {final_offset:.3f} is out of range "
                     f"[-{self.max_z_offset}, {self.max_z_offset}]. "
-                    "Please check and recalibrate.\n"
-                )
-                output += error_msg
-
-        except Exception as e:
-            output = f"Dual-Nozzle Offset Calculation Error: {str(e)}\n"
-
-        finally:
+                    "Please check and recalibrate.")
+                return
             self.gcmd.respond_info(output)
-            self._reset_state()
+            self._report_z_offset_progress(
+                'end', result='completed',
+                z_offset='%.6f' % (final_offset,),
+                left_probe_avg='%.6f' % (left_avg,),
+                right_probe_avg='%.6f' % (right_avg,))
+        except Exception as e:
+            self._fail_z_offset_calibration(
+                'calculation_failed',
+                f"Dual-Nozzle Offset Calculation Error: {str(e)}")
+            return
+        self._reset_state()
+
+    def _report_z_offset_update(self, step, phase):
+        self._report_z_offset_progress(
+            'update', step=step, total=4, phase=phase)
+
+    def _report_z_offset_error(self, reason):
+        self._report_z_offset_progress(
+            'error', result='failed', reason=reason)
+        self._z_offset_progress_active = False
+
+    def _fail_z_offset_calibration(self, reason, message):
+        self._report_z_offset_error(reason)
+        self.gcmd.respond_info(message)
+        self._reset_state()
 
     def _reset_state(self):
         self.state = CalibrationState.INIT
         self._waiting = False
         self.next_callback = None
+        self._z_offset_progress_active = False
 
     def _get_probe_accuracy_avg(self, probe_name):
         pch = self.printer.lookup_object(probe_name)
         status = pch.get_status(self.printer.get_reactor().monotonic())
-        return float(status.get('accuracy_avg', 0.0))
+        if 'accuracy_avg' not in status:
+            raise ValueError("Probe accuracy result is unavailable")
+        accuracy_avg = float(status['accuracy_avg'])
+        if not math.isfinite(accuracy_avg):
+            raise ValueError("Probe accuracy result is invalid")
+        return accuracy_avg
 
 # Main external probe interface
 class PrinterDualProbe:

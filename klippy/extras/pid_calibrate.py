@@ -4,14 +4,14 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import math, logging
-from . import heaters
+from . import operation_progress, heaters
 
 class PIDCalibrate:
     def __init__(self, config):
         self.printer = config.get_printer()
-        gcode = self.printer.lookup_object('gcode')
-        gcode.register_command('PID_CALIBRATE', self.cmd_PID_CALIBRATE,
-                               desc=self.cmd_PID_CALIBRATE_help)
+        self.gcode = self.printer.lookup_object('gcode')
+        self.gcode.register_command('PID_CALIBRATE', self.cmd_PID_CALIBRATE,
+                                    desc=self.cmd_PID_CALIBRATE_help)
     cmd_PID_CALIBRATE_help = "Run PID calibration test"
     def cmd_PID_CALIBRATE(self, gcmd):
         heater_name = gcmd.get('HEATER')
@@ -23,17 +23,34 @@ class PIDCalibrate:
         except self.printer.config_error as e:
             raise gcmd.error(str(e))
         self.printer.lookup_object('toolhead').get_last_move_time()
-        calibrate = ControlAutoTune(heater, target)
+        calibration_id = 'pid_%s' % (heater.get_name(),)
+        operation_progress.respond(
+            self.gcode, 'begin', id=calibration_id, type='pid', step=0,
+            total=6, phase='heating')
+        def report_pid_cycle(peak_count):
+            if peak_count % 2:
+                return
+            operation_progress.respond(
+                self.gcode, 'update', id=calibration_id, type='pid',
+                step=peak_count // 2, total=6, phase='tuning')
+        calibrate = ControlAutoTune(
+            heater, target, report_pid_cycle)
         old_control = heater.set_control(calibrate)
         try:
             pheaters.set_temperature(heater, target, True)
         except self.printer.command_error as e:
             heater.set_control(old_control)
+            operation_progress.respond(
+                self.gcode, 'error', id=calibration_id, type='pid',
+                result='failed', reason='interrupted')
             raise
         heater.set_control(old_control)
         if write_file:
             calibrate.write_file('/tmp/heattest.txt')
         if calibrate.check_busy(0., 0., 0.):
+            operation_progress.respond(
+                self.gcode, 'error', id=calibration_id, type='pid',
+                result='failed', reason='interrupted')
             raise gcmd.error("pid_calibrate interrupted")
         # Log and report results
         Kp, Ki, Kd = calibrate.calc_final_pid()
@@ -49,11 +66,14 @@ class PIDCalibrate:
         configfile.set(cfgname, 'pid_Kp', "%.3f" % (Kp,))
         configfile.set(cfgname, 'pid_Ki', "%.3f" % (Ki,))
         configfile.set(cfgname, 'pid_Kd', "%.3f" % (Kd,))
+        operation_progress.respond(
+            self.gcode, 'end', id=calibration_id, type='pid',
+            result='completed')
 
 TUNE_PID_DELTA = 5.0
 
 class ControlAutoTune:
-    def __init__(self, heater, target):
+    def __init__(self, heater, target, progress_callback=None):
         self.heater = heater
         self.heater_max_power = heater.get_max_power()
         self.calibrate_temp = target
@@ -67,6 +87,7 @@ class ControlAutoTune:
         self.last_pwm = 0.
         self.pwm_samples = []
         self.temp_samples = []
+        self.progress_callback = progress_callback
     # Heater control
     def set_pwm(self, read_time, value):
         if value != self.last_pwm:
@@ -104,6 +125,8 @@ class ControlAutoTune:
     # Analysis
     def check_peaks(self):
         self.peaks.append((self.peak, self.peak_time))
+        if self.progress_callback is not None:
+            self.progress_callback(len(self.peaks))
         if self.heating:
             self.peak = 9999999.
         else:
