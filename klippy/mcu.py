@@ -717,6 +717,16 @@ class MCU:
                     "Pin '%s' is not a valid pin name on mcu '%s'"
                     % (enum_value, self._name))
             raise
+    def _recover_shutdown_at_connect(self):
+        start_reason = self._printer.get_start_args().get("start_reason")
+        if start_reason == 'firmware_restart':
+            return False
+        logging.warning("MCU '%s' is in shutdown at connect - performing an "
+                        "automatic firmware restart", self._name)
+        self._printer.request_exit('firmware_restart')
+        self._reactor.pause(self._reactor.monotonic() + 2.000)
+        return True
+
     def _send_get_config(self):
         get_config_cmd = self.lookup_query_command(
             "get_config",
@@ -728,6 +738,7 @@ class MCU:
             raise error("MCU '%s' error during config: %s" % (
                 self._name, self._shutdown_msg))
         if config_params['is_shutdown']:
+            self._recover_shutdown_at_connect()
             raise error("Can not update MCU '%s' config as it is shutdown" % (
                 self._name,))
         return config_params
