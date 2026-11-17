@@ -194,7 +194,10 @@ class NozzleCleaner:
             current_step = self.y_step
             for i in range(self.nozzle_loop_x):
                 current_y += current_step
-                if current_y < self.run_y_min or current_y > self.run_y_max:
+                # 1e-6 tolerance: a pass landing exactly on an edge must not
+                # be reversed by floating point rounding.
+                if (current_y < self.run_y_min - 1e-6
+                        or current_y > self.run_y_max + 1e-6):
                     current_step = -current_step
                     current_y += 2 * current_step
                 x_coord = self.run_x_max if i % 2 == 0 else self.run_x_min
@@ -211,7 +214,7 @@ class NozzleCleaner:
             current_x = self.run_x_min
             for i in range(self.nozzle_loop_y):
                 current_x += self.x_step
-                if current_x > self.run_x_max:
+                if current_x > self.run_x_max + 1e-6:
                     break
                 y_coord = self.run_y_min if i % 2 == 0 else self.run_y_max
                 original_x, original_y = current_x, y_coord
