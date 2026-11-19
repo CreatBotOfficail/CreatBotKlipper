@@ -32,7 +32,7 @@ class NozzleCleaner:
         self.clean_speed = config.getfloat('clean_speed', 4000.0)
         # Fallback cleaning temperature, used until a print has recorded one.
         # Kept as a config option so it stays overridable per machine.
-        self.hotend_temp = config.getfloat('hotend_temp', 200.0)
+        self.hotend_temp = config.getfloat('hotend_temp', 180.0)
         # Cleaning temperature is the left nozzle print temperature minus this.
         self.temp_offset = config.getfloat('temp_offset', 20.0)
         self.nozzle_loops = config.getint('nozzle_loops', 2)
