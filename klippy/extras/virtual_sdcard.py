@@ -3,7 +3,7 @@
 # Copyright (C) 2018-2024  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import os, sys, logging, io
+import os, logging, io, re, threading
 
 VALID_GCODE_EXTS = ['gcode', 'g', 'gco']
 
@@ -12,6 +12,51 @@ DEFAULT_ERROR_GCODE = """
    TURN_OFF_HEATERS
 {% endif %}
 """
+
+class _CacheJob:
+    def __init__(self, source_path, cache_file):
+        self.source_path = source_path
+        self.cache_file = cache_file
+        self.lock = threading.Lock()
+        self.copied = 0
+        self.done = False
+        self.error = False
+        self.cancelled = False
+        self.thread = None
+    def cancel(self):
+        with self.lock:
+            self.cancelled = True
+    def snapshot(self):
+        # copied only covers bytes already flushed to the cache file
+        with self.lock:
+            return self.copied, self.done, self.error
+    def run(self):
+        try:
+            with self.lock:
+                if self.cancelled:
+                    return
+            with open(self.source_path, 'rb') as src, \
+                    open(self.cache_file, 'wb') as dst:
+                while True:
+                    with self.lock:
+                        if self.cancelled:
+                            return
+                    chunk = src.read(64 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    dst.flush()
+                    with self.lock:
+                        self.copied += len(chunk)
+            with self.lock:
+                self.done = True
+                copied = self.copied
+            logging.info("virtual_sdcard: cached %s (%d bytes)",
+                         self.cache_file, copied)
+        except Exception:
+            logging.exception("virtual_sdcard: cache copy failed")
+            with self.lock:
+                self.error = True
 
 class VirtualSD:
     def __init__(self, config):
@@ -27,11 +72,11 @@ class VirtualSD:
         self.cache_enabled = config.getboolean('cache_enabled', False)
         self.cache_path = config.get('cache_path', '~/printer_data/cache')
         self.cache_path = os.path.normpath(os.path.expanduser(self.cache_path))
-        self.cached_file = None
         self.original_file_path = None
-        # Background copy related
-        self.copy_thread = None
-        self.copy_complete = False
+        # Background copy to local cache (read position gated by watermark)
+        self.cache_job = None
+        self._source_file = None
+        self._cache_seq = 0
         # Print Stat Tracking
         self.print_stats = self.printer.load_object(config, 'print_stats')
         # Work timer
@@ -144,7 +189,7 @@ class VirtualSD:
             self.current_file.close()
             self.current_file = None
             self.print_stats.note_cancel()
-        self._cleanup_cache(clean_files=False)
+        self._cleanup_cache(clean_files=True)
         self.file_position = self.file_size = 0
         self.file_line = self.file_runline = 0
     # G-Code commands
@@ -155,6 +200,7 @@ class VirtualSD:
             self.do_pause()
             self.current_file.close()
             self.current_file = None
+        self._cleanup_cache(clean_files=True)
         self.original_file_path = None
         self.file_position = self.file_size = 0
         self.file_line = self.file_runline = 0
@@ -162,125 +208,158 @@ class VirtualSD:
         self.printer.send_event("virtual_sdcard:reset_file")
     
     def _cleanup_cache(self, clean_files=True):
-        if self.copy_thread and self.copy_thread.is_alive():
+        # State lives on the job object, so an abandoned stuck thread can
+        # never pollute the next print's watermark
+        job = self.cache_job
+        self.cache_job = None
+        if job is not None:
+            job.cancel()
+            if job.thread is not None and job.thread.is_alive():
+                logging.warning(
+                    "virtual_sdcard: abandoning cache copy thread")
+        self._close_source_file()
+        if clean_files:
+            self._remove_cache_files()
+
+    def _close_source_file(self):
+        if self._source_file is None:
+            return
+        try:
+            self._source_file.close()
+        except Exception:
+            logging.exception("virtual_sdcard: close source file")
+        self._source_file = None
+
+    def _remove_cache_files(self):
+        if not os.path.isdir(self.cache_path):
+            return
+        try:
+            names = os.listdir(self.cache_path)
+        except Exception:
+            logging.exception("virtual_sdcard: cache cleanup")
+            return
+        for name in names:
+            path = os.path.join(self.cache_path, name)
+            if not os.path.isfile(path):
+                continue
             try:
-                self.copy_thread.join(timeout=1.0)
-            except:
-                pass
+                os.remove(path)
+            except Exception:
+                logging.exception("virtual_sdcard: remove %s", path)
 
-        self.copy_thread = None
-        self.copy_complete = False
-
-        if clean_files and os.path.exists(self.cache_path):
-            try:
-                import glob
-                cache_files = glob.glob(os.path.join(self.cache_path, "*"))
-                for cache_file in cache_files:
-                    os.remove(cache_file)
-            except:
-                pass
-
-        self.cached_file = None
-    
     def _is_removable_media(self, file_path):
-        """Detect if file is on removable storage device"""
+        # Find the longest matching mount point in /proc/mounts, then
+        # check the parent disk's removable flag in sysfs.
         try:
-            import re
-            import subprocess
-
-            # Find device mount point
-            result = subprocess.run(['findmnt', '-n', '-o', 'SOURCE', '--target', file_path],
-                                   capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
+            path = os.path.realpath(file_path)
+            best_len = -1
+            device = None
+            with open('/proc/mounts', 'r') as f:
+                for line in f:
+                    fields = line.split()
+                    if len(fields) < 2 or not fields[0].startswith('/dev/'):
+                        continue
+                    mountpoint = fields[1].replace('\\040', ' ')
+                    if (path == mountpoint
+                            or path.startswith(mountpoint.rstrip('/') + '/')):
+                        if len(mountpoint) > best_len:
+                            best_len = len(mountpoint)
+                            device = os.path.realpath(fields[0])
+            if device is None:
                 return False
-
-            device_path = result.stdout.strip()
-            if not device_path:
+            name = os.path.basename(device)
+            # Partition -> parent disk: sda1 -> sda, mmcblk0p1 -> mmcblk0
+            m = re.match(r'^(.+?)p(\d+)$', name)
+            if m and m.group(1)[-1].isdigit():
+                name = m.group(1)
+            else:
+                name = name.rstrip('0123456789')
+            removable_path = '/sys/block/%s/removable' % name
+            if not os.path.exists(removable_path):
+                # /dev/root, dm-*, mtdblock* etc. have no sysfs entry
                 return False
+            with open(removable_path, 'r') as f:
+                return f.read().strip() == '1'
+        except Exception:
+            logging.exception("virtual_sdcard: removable media detection")
+            return False
 
-            # Extract block device name (e.g., /dev/sdb1 -> sdb)
-            match = re.search(r'/dev/([a-z]+)', device_path)
-            if not match:
-                return False
-
-            block_device = match.group(1)
-
-            removable_path = f'/sys/block/{block_device}/removable'
-            if os.path.exists(removable_path):
-                with open(removable_path, 'r') as f:
-                    return f.read().strip() == '1'
-
-        except:
-            pass
-
-        return False
-
-    def async_copy_file(self, source_file, cache_file, original_file):
+    def _run_on_error_gcode(self):
+        # on_error_gcode may run CANCEL_PRINT -> do_cancel -> do_pause,
+        # which waits for work_timer to clear. That can never happen while
+        # we are inside work_handler, so mark the command as sd-originated
+        # (do_pause only waits when cmd_from_sd is False)
+        prev_cmd_from_sd = self.cmd_from_sd
+        self.cmd_from_sd = True
         try:
-            with open(source_file, 'rb') as src, open(cache_file, 'wb') as dst:
-                chunk_size = 64 * 1024  # 64KB chunks
-                while True:
-                    chunk = src.read(chunk_size)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-                    dst.flush()
+            self.gcode.run_script(self.on_error_gcode.render())
+        except Exception:
+            logging.exception("virtual_sdcard on_error")
+        finally:
+            self.cmd_from_sd = prev_cmd_from_sd
 
-            self.copy_complete = True
-
-            if original_file:
-                try:
-                    original_file.close()
-                except:
-                    pass
-
-        except:
-            self.copy_complete = False
-
-    def _wait_for_cache_file(self, cache_file_path):
-        import time
-        time.sleep(0.1)
-        for _ in range(100):  # Wait up to 10 seconds
-            if os.path.exists(cache_file_path):
-                try:
-                    return io.open(cache_file_path, 'r', newline='')
-                except:
-                    pass
-            time.sleep(0.1)
-        return None
+    def _fallback_to_source(self):
+        if self._source_file is None:
+            return False
+        try:
+            pos = self.current_file.tell()
+            self._source_file.seek(pos)
+            self.current_file.close()
+            self.current_file = self._source_file
+            self._source_file = None
+            job = self.cache_job
+            self.cache_job = None
+            if job is not None:
+                job.cancel()
+            self._remove_cache_files()
+            logging.warning("virtual_sdcard: cache copy failed, "
+                            "falling back to USB source")
+            self.gcode.respond_info(
+                "Cache copy failed, printing directly from USB drive")
+            return True
+        except Exception:
+            logging.exception("virtual_sdcard: fallback to source failed")
+            return False
 
     def _handle_file_caching(self, gcmd, fname, f):
-        is_removable = self._is_removable_media(fname)
-        should_cache = self.cache_enabled and is_removable
-
-        if should_cache:
-            
-            import threading
-            self._cleanup_cache(clean_files=True)  # Only clean files when starting new cache
-            try:
-                if not os.path.exists(self.cache_path):
-                    os.makedirs(self.cache_path)
-
-                cache_file = os.path.join(self.cache_path, os.path.basename(fname))
-                self.cached_file = cache_file
-
-                self.copy_thread = threading.Thread(
-                    target=self.async_copy_file,
-                    args=(fname, cache_file, f),
-                    daemon=True
-                )
-                self.copy_thread.start()
-
-                cache_file_obj = self._wait_for_cache_file(cache_file)
-                if cache_file_obj:
-                    self.current_file = cache_file_obj
-                else:
-                    self.cached_file = None
-                    gcmd.respond_raw("Cache file creation failed")
-
-            except:
-                self.cached_file = None
-                gcmd.respond_raw("Cache failed, ensure USB connection is stable")
+        if not self.cache_enabled or not self._is_removable_media(fname):
+            return
+        self._cleanup_cache(clean_files=True)
+        cache_file_obj = None
+        try:
+            if not os.path.exists(self.cache_path):
+                os.makedirs(self.cache_path)
+            st = os.statvfs(self.cache_path)
+            free = st.f_bavail * st.f_frsize
+            if free < self.file_size + (64 << 20):
+                gcmd.respond_info("Not enough space to cache USB file, "
+                                  "printing directly from USB drive")
+                return
+            # Unique name per job: an abandoned copy thread must never
+            # truncate a newer job's cache file
+            self._cache_seq += 1
+            cache_file = os.path.join(
+                self.cache_path,
+                "%d_%s" % (self._cache_seq, os.path.basename(fname)))
+            # Create the file up front so the read handle is ready without
+            # polling (and blocking the reactor) in the command handler
+            with open(cache_file, 'wb'):
+                pass
+            cache_file_obj = io.open(cache_file, 'rb')
+            job = _CacheJob(fname, cache_file)
+            job.thread = threading.Thread(target=job.run, daemon=True)
+            job.thread.start()
+        except Exception:
+            logging.exception("virtual_sdcard: cache setup failed")
+            if cache_file_obj is not None:
+                cache_file_obj.close()
+            self._cleanup_cache(clean_files=True)
+            gcmd.respond_info("Cache failed, printing directly from USB drive")
+            return
+        self.cache_job = job
+        self._source_file = f
+        self.current_file = cache_file_obj
+        logging.info("virtual_sdcard: caching %s -> %s", fname, cache_file)
 
     cmd_SDCARD_RESET_FILE_help = "Clears a loaded SD File. Stops the print "\
         "if necessary"
@@ -345,7 +424,7 @@ class VirtualSD:
             if fname not in flist:
                 fname = files_by_lower[fname.lower()]
             fname = os.path.join(self.sdcard_dirname, fname)
-            f = io.open(fname, 'r', newline='')
+            f = io.open(fname, 'rb')
             f.seek(0, os.SEEK_END)
             fsize = f.tell()
             f.seek(0)
@@ -399,17 +478,45 @@ class VirtualSD:
             return self.reactor.NEVER
         self.print_stats.note_start()
         gcode_mutex = self.gcode.get_mutex()
-        partial_input = ""
+        partial_input = b""
         lines = []
         error_message = None
         cancel_on_error = False
         while not self.must_pause_work:
             if not lines:
                 # Read more data
+                job = self.cache_job
+                read_size = 8192
+                if job is not None:
+                    copied, done, error = job.snapshot()
+                    if error:
+                        if self._fallback_to_source():
+                            continue
+                        error_message = "Cache copy failed and USB " \
+                                        "source unavailable"
+                        logging.error("virtual_sdcard: %s", error_message)
+                        self._run_on_error_gcode()
+                        break
+                    if done:
+                        # Copy finished: release the USB source handle so
+                        # the drive can be safely unmounted
+                        self.cache_job = None
+                        self._close_source_file()
+                    else:
+                        # Never read past the flushed watermark
+                        pos = self.current_file.tell()
+                        if pos >= copied:
+                            # Copy has not reached the read position yet
+                            self.reactor.pause(
+                                self.reactor.monotonic() + 0.05)
+                            continue
+                        read_size = min(read_size, copied - pos)
                 try:
-                    data = self.current_file.read(8192)
-                except:
+                    data = self.current_file.read(read_size)
+                except Exception as e:
                     logging.exception("virtual_sdcard read")
+                    error_message = "SD card read failed: %s" % (e,)
+                    self._run_on_error_gcode()
                     break
                 if not data:
                     # End of file
@@ -419,7 +526,7 @@ class VirtualSD:
                     logging.info("Finished SD card print")
                     self.gcode.respond_raw("Done printing file")
                     break
-                lines = data.split('\n')
+                lines = data.split(b'\n')
                 lines[0] = partial_input + lines[0]
                 partial_input = lines.pop()
                 lines.reverse()
@@ -433,20 +540,16 @@ class VirtualSD:
             self.cmd_from_sd = True
             line = lines.pop()
             self.file_line += 1
-            if sys.version_info.major >= 3:
-                next_file_position = self.file_position + len(line.encode()) + 1
-            else:
-                next_file_position = self.file_position + len(line) + 1
+            next_file_position = self.file_position + len(line) + 1
             self.next_file_position = next_file_position
             try:
-                self.gcode.run_script(line)
+                # Decode per complete line so a copy boundary that splits a
+                # multibyte character can never abort the print
+                self.gcode.run_script(line.decode('utf-8', 'replace'))
             except self.gcode.error as e:
                 error_message = str(e)
                 cancel_on_error = self.gcode.is_cancel_requested()
-                try:
-                    self.gcode.run_script(self.on_error_gcode.render())
-                except:
-                    logging.exception("virtual_sdcard on_error")
+                self._run_on_error_gcode()
                 break
             except:
                 logging.exception("virtual_sdcard dispatch")
@@ -462,7 +565,7 @@ class VirtualSD:
                     self.work_timer = None
                     return self.reactor.NEVER
                 lines = []
-                partial_input = ""
+                partial_input = b""
         logging.info("Exiting SD card print (position %d)", self.file_position)
         self.work_timer = None
         self.cmd_from_sd = False
