@@ -179,6 +179,9 @@ class Ktamv:
         self.gcode = self.printer.lookup_object("gcode")
         self.camera_center_points = config.getfloatlist('camera_center_points')
         self.base_x_offset = config.getfloat('base_x_offset', 0.0)
+        # When set, calibration ignores the saved camera offsets and starts
+        # from the nominal camera center (memory only, never persisted).
+        self._ignore_saved_center_offset = False
         self.gain = config.getfloat('gain', 0.55)
 
         self.current_state = CalibrationState.IDLE
@@ -524,8 +527,7 @@ class Ktamv:
     def _search_next_point(self, phase_name):
         self._search_index += 1
         if self._search_index >= len(self._search_points):
-            self._handle_operation_failure(
-                "Nozzle not found within search area.")
+            self._retry_or_fail("Nozzle not found within search area.")
             return
         dx, dy = self._search_points[self._search_index]
         self.gcmd.respond_info(
@@ -595,7 +597,7 @@ class Ktamv:
                            prev_dx_attr, prev_dy_attr, max_iters,
                            iter_attr, on_centered, threshold=5):
         if nozzle_uv is None:
-            self._handle_operation_failure("Nozzle lost during centering")
+            self._retry_or_fail("Nozzle lost during centering")
             return False
         dx_pixel = FRAME_WIDTH / 2.0 - nozzle_uv[0]
         dy_pixel = FRAME_HEIGHT / 2.0 - nozzle_uv[1]
@@ -720,6 +722,7 @@ class Ktamv:
     def cmd_KTAMV_CALIB_NOZZLE(self, gcmd):
         gcmd.respond_info("Starting nozzle calibration")
         self.calibration_retries = 0
+        self._ignore_saved_center_offset = False
         self._xy_offset_progress_active = True
         self._report_xy_offset_progress(
             'begin', step=0, total=5, phase='preparing')
@@ -756,6 +759,7 @@ class Ktamv:
         + " centers it, and records the camera center offset")
     def cmd_KTAMV_CALIB_CAMERA(self, gcmd):
         gcmd.respond_info("Starting automatic camera center calibration")
+        self._ignore_saved_center_offset = False
         self.pm.ensureHomed()
         self._switch_tool(0)
         self._move_to_camera_center()
@@ -949,6 +953,7 @@ class Ktamv:
                     y_offset='%.3f' % (y_offset,))
                 self._xy_offset_progress_active = False
                 self.current_state = CalibrationState.IDLE
+                self._ignore_saved_center_offset = False
 
             if current_step != CalibrationStep.COMPLETE:
                 self.reactor.register_callback(self._polling_step, eventtime + interval)
@@ -1217,13 +1222,21 @@ class Ktamv:
 
     def _move_to_camera_center(self):
         camera_canter = list(self.camera_center_points)
-        save_variables = self.printer.lookup_object('save_variables').allVariables
-        if "camera_x_offset_val" in save_variables:
-            camera_canter[0] = self.camera_center_points[0] + save_variables.get("camera_x_offset_val", 0.)
-        if "camera_y_offset_val" in save_variables:
-            camera_canter[1] = self.camera_center_points[1] + save_variables.get("camera_y_offset_val", 0.)
-        if "camera_z_offset_val" in save_variables:
-            camera_canter[2] = self.camera_center_points[2] + save_variables.get("camera_z_offset_val", 0.)
+        if not self._ignore_saved_center_offset:
+            save_variables = self.printer.lookup_object(
+                'save_variables').allVariables
+            if "camera_x_offset_val" in save_variables:
+                camera_canter[0] = (self.camera_center_points[0]
+                                    + save_variables.get(
+                                        "camera_x_offset_val", 0.))
+            if "camera_y_offset_val" in save_variables:
+                camera_canter[1] = (self.camera_center_points[1]
+                                    + save_variables.get(
+                                        "camera_y_offset_val", 0.))
+            if "camera_z_offset_val" in save_variables:
+                camera_canter[2] = (self.camera_center_points[2]
+                                    + save_variables.get(
+                                        "camera_z_offset_val", 0.))
         self.pm.moveAbsoluteToArray(camera_canter)
 
     def _switch_tool(self, tool_index):
@@ -1232,12 +1245,22 @@ class Ktamv:
     def _handle_operation_failure(self, error_msg):
         self._report_xy_offset_error('failed')
         self._cleanup_operation()
+        self._ignore_saved_center_offset = False
         self.current_state = CalibrationState.IDLE
         if hasattr(self, 'calibration_state'):
             self.calibration_state['error'] = error_msg
         self.gcode.respond_raw(f'!! {error_msg}')
         raise self.gcode.error(f"{error_msg}")
     
+    def _retry_or_fail(self, error_msg):
+        """Detection failures inside the calibration flow are retried once
+        from the nominal center; everything else is terminal."""
+        if (getattr(self, 'calibration_state', None)
+                and self.current_state == CalibrationState.CAMERA_CALIBRATION):
+            self._retry_camera_calibration(error_msg)
+        else:
+            self._handle_operation_failure(error_msg)
+
     def _retry_camera_calibration(self, retry_message):
         """Retry camera calibration with proper state reset"""
         self.calibration_retries += 1
@@ -1245,6 +1268,14 @@ class Ktamv:
             self.calibration_retries = 0
             self._handle_operation_failure(f"{retry_message} after all calibration attempts")
         
+        # Saved offsets may not match the current nominal camera center
+        # (e.g. after a config update). From the first retry on, start from
+        # the nominal center so the search can re-acquire the nozzle.
+        if not self._ignore_saved_center_offset:
+            self._ignore_saved_center_offset = True
+            self.gcode.respond_info(
+                "Saved camera offsets not usable;"
+                " retrying from nominal camera center")
         # Reset calibration to camera calibration step
         self.gcode.respond_info(
             f"{retry_message}. Retrying camera calibration ({self.calibration_retries}/{self.max_calibration_retries})..."
