@@ -408,8 +408,14 @@ class ConfigAutoSave:
                     msg = ("SAVE_CONFIG section '%s' option '%s' conflicts "
                            "with included value" % (section, option))
                     raise self.printer.command_error(msg)
-    cmd_SAVE_CONFIG_help = "Overwrite config file and restart"
+    cmd_SAVE_CONFIG_help = "Overwrite config file and optionally restart"
     def cmd_SAVE_CONFIG(self, gcmd):
+        restart = gcmd.get_int('RESTART', 1)
+        self.save_config(restart)
+    def save_config(self, restart=1):
+        if restart not in (0, 1):
+            raise self.printer.command_error(
+                "Value for parameter 'RESTART' must be 0 or 1")
         if not self.fileconfig.sections():
             return
         # Create string containing autosave data
@@ -427,13 +433,13 @@ class ConfigAutoSave:
         except error as e:
             msg = "Unable to read existing config on SAVE_CONFIG"
             logging.exception(msg)
-            raise gcmd.error(msg)
+            raise self.printer.command_error(msg)
         regular_data, old_autosave_data = self._find_autosave_data(data)
         regular_data = self._strip_duplicates(regular_data, self.fileconfig)
         data = regular_data.rstrip() + autosave_data
         new_regular_data, new_autosave_data = self._find_autosave_data(data)
         if not new_autosave_data:
-            raise gcmd.error(
+            raise self.printer.command_error(
                 "Existing config autosave is corrupted."
                 " Can't complete SAVE_CONFIG")
         try:
@@ -442,7 +448,7 @@ class ConfigAutoSave:
         except error as e:
             msg = "Unable to parse existing config on SAVE_CONFIG"
             logging.exception(msg)
-            raise gcmd.error(msg)
+            raise self.printer.command_error(msg)
         self._disallow_include_conflicts(regular_fileconfig)
         # Determine filenames
         datestr = time.strftime("-%Y%m%d_%H%M%S")
@@ -463,10 +469,12 @@ class ConfigAutoSave:
         except:
             msg = "Unable to write config file during SAVE_CONFIG"
             logging.exception(msg)
-            raise gcmd.error(msg)
-        # Request a restart
-        gcode = self.printer.lookup_object('gcode')
-        gcode.request_restart('restart')
+            raise self.printer.command_error(msg)
+        self.status_save_pending = {}
+        self.save_config_pending = False
+        if restart:
+            gcode = self.printer.lookup_object('gcode')
+            gcode.request_restart('restart')
 
 
 ######################################################################
@@ -595,3 +603,5 @@ class PrinterConfig:
         self.autosave.set(section, option, value)
     def remove_section(self, section):
         self.autosave.remove_section(section)
+    def save_config(self, restart=1):
+        self.autosave.save_config(restart)

@@ -348,6 +348,7 @@ class BedMeshCalibrate:
         except BedMeshError as e:
             raise config.error(str(e))
         self._profile_name = "default"
+        self._auto_save = False
         self.gcode = self.printer.lookup_object('gcode')
         self.gcode.register_command(
             'BED_MESH_CALIBRATE', self.cmd_BED_MESH_CALIBRATE,
@@ -645,8 +646,13 @@ class BedMeshCalibrate:
             "probe_path": self.probe_mgr.get_std_path(),
             "rapid_path": list(self.probe_mgr.iter_rapid_path())
         }
-    cmd_BED_MESH_CALIBRATE_help = "Perform Mesh Bed Leveling"
+    cmd_BED_MESH_CALIBRATE_help = (
+        "Perform Mesh Bed Leveling (AUTOSAVE=1 saves without restart when idle)")
     def cmd_BED_MESH_CALIBRATE(self, gcmd):
+        autosave = gcmd.get_int('AUTOSAVE', 1)
+        if autosave not in (0, 1):
+            raise gcmd.error("Value for parameter 'AUTOSAVE' must be 0 or 1")
+        self._auto_save = bool(autosave) and not gcmd.get_int('ADAPTIVE', 0)
         self._profile_name = gcmd.get('PROFILE', "default")
         if not self._profile_name.strip():
             raise gcmd.error("Value for parameter 'PROFILE' must be specified")
@@ -694,6 +700,15 @@ class BedMeshCalibrate:
         operation_progress.respond(
             self.gcode, 'error', id='bed_mesh', type='bed_mesh',
             reason='cancelled')
+    def _should_auto_save(self):
+        if not self._auto_save:
+            return False
+        print_stats = self.printer.lookup_object('print_stats')
+        return print_stats.state in ('standby', 'complete', 'cancelled')
+    def _save_config_without_restart(self):
+        configfile = self.printer.lookup_object('configfile')
+        configfile.save_config(restart=False)
+        self.gcode.respond_info("Printer config file updated without restart")
     def probe_finalize(self, offsets, positions):
         operation_progress.respond(
             self.gcode, 'update', id='bed_mesh', type='bed_mesh',
@@ -831,8 +846,11 @@ class BedMeshCalibrate:
             z_mesh.set_zero_reference(*zero_ref_pos)
         self.bedmesh.set_mesh(z_mesh)
         self.gcode.respond_info("Mesh Bed Leveling Complete")
+        auto_save = self._should_auto_save()
         if self._profile_name is not None:
-            self.bedmesh.save_profile(self._profile_name)
+            self.bedmesh.save_profile(self._profile_name, auto_save)
+            if auto_save:
+                self._save_config_without_restart()
         operation_progress.respond(
             self.gcode, 'end', id='bed_mesh', type='bed_mesh',
             result='completed')
@@ -1766,7 +1784,7 @@ class ProfileManager:
                 "The SAVE_CONFIG command will update the printer config\n"
                 "file and restart the printer" %
                 (('\n').join(self.incompatible_profiles)))
-    def save_profile(self, prof_name):
+    def save_profile(self, prof_name, auto_save=False):
         z_mesh = self.bedmesh.get_mesh()
         if z_mesh is None:
             self.gcode.respond_info(
@@ -1796,11 +1814,16 @@ class ProfileManager:
         profile['mesh_params'] = collections.OrderedDict(mesh_params)
         self.profiles = profiles
         self.bedmesh.update_status()
-        self.gcode.respond_info(
-            "Bed Mesh state has been saved to profile [%s]\n"
-            "for the current session.  The SAVE_CONFIG command will\n"
-            "update the printer config file and restart the printer."
-            % (prof_name))
+        if auto_save:
+            self.gcode.respond_info(
+                "Bed Mesh state has been saved to profile [%s]\n"
+                "for the current session." % (prof_name,))
+        else:
+            self.gcode.respond_info(
+                "Bed Mesh state has been saved to profile [%s]\n"
+                "for the current session.  The SAVE_CONFIG command will\n"
+                "update the printer config file and restart the printer."
+                % (prof_name,))
     def load_profile(self, prof_name):
         profile = self.profiles.get(prof_name, None)
         if profile is None:
