@@ -1151,14 +1151,26 @@ class ProbeEddy:
 
     cmd_SETUP_help = "Setup"
 
+    def _prepare_setup_position(self):
+        safe_z_home = self._printer.lookup_object("safe_z_home", None)
+        if safe_z_home is None:
+            return
+        th = self._toolhead
+        th.wait_moves()
+        cur_z = th.get_position()[2]
+        travel_z = max(cur_z, self.params.calibration_z_max + 3.0)
+        if cur_z < travel_z:
+            th.manual_move([None, None, travel_z],
+                           self.params.lift_speed)
+            th.wait_moves()
+        th.manual_move(
+            [safe_z_home.home_x_pos, safe_z_home.home_y_pos],
+            safe_z_home.speed)
+        th.wait_moves()
+
     def cmd_SETUP(self, gcmd: GCodeCommand):
         if not self._xy_homed():
             raise self._printer.command_error("X and Y must be homed before setup")
-
-        if self._z_homed():
-            # z-hop so that manual probe helper doesn't complain if we're already
-            # at the right place
-            self._z_hop()
 
         if not self._is_temperature_stable(gcmd):
             raise self._printer.command_error("Temperature is not stable. Please wait for temperature to stabilize before running setup.")
@@ -1167,10 +1179,15 @@ class ProbeEddy:
         th_pos = th.get_position()
         have_probe = self._printer.lookup_object("probe")
         if self._z_homed() and have_probe is not None:
+            self._prepare_setup_position()
             kin = self._toolhead.get_kinematics()
             th.manual_move([None, None, 0.0],self.params.lift_speed,)
             self.cmd_SETUP_next(gcmd, kin, True)
         else:
+            if self._z_homed():
+                # z-hop so that manual probe helper doesn't complain if we're
+                # already at the right place
+                self._z_hop()
             # XXX This is proably not correct for some printers?
             zrange = th.get_kinematics().rails[2].get_range()
             th_pos[2] = zrange[1] - 20.0

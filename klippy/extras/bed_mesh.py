@@ -1334,16 +1334,21 @@ class RapidScanHelper:
         pparams = pprobe.get_probe_params(gcmd)
         lift_speed = pparams["lift_speed"]
 
-        safe_z_home = self.printer.lookup_object("safe_z_home", None)
-        if safe_z_home is None:
-            pass
-        else:
-            cur_pos[0] = safe_z_home.home_x_pos
-            cur_pos[1] = safe_z_home.home_y_pos
+        if cur_pos[2] < scan_height:
+            toolhead.manual_move([None, None, scan_height], lift_speed)
+            toolhead.wait_moves()
 
-        cur_pos[2] = self.scan_height
-        toolhead.manual_move(cur_pos, lift_speed)
-        toolhead.wait_moves()
+        safe_z_home = self.printer.lookup_object("safe_z_home", None)
+        if safe_z_home is not None:
+            # Keep XY travel independent of the slower Z lift speed.
+            toolhead.manual_move(
+                [safe_z_home.home_x_pos, safe_z_home.home_y_pos],
+                safe_z_home.speed)
+            toolhead.wait_moves()
+
+        if cur_pos[2] > scan_height:
+            toolhead.manual_move([None, None, scan_height], lift_speed)
+            toolhead.wait_moves()
 
     def _move_to_scan_height(self, gcmd, scan_height):
         time_window = gcmd.get_float("SAMPLE_TIME")
